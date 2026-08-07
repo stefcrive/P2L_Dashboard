@@ -1,0 +1,81 @@
+# Dependencies
+node_modules/
+.pnpm-debug.log*
+
+# Production builds
+dist/
+build/
+.next/
+.next-verify/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+venv/
+.venv/
+env/
+ENV/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.tox/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+.local-data/
+Merged_text_files/
+LLM_processing/
+Results/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Temporary files
+.tmp/
+temp/
+tmp/
+
+# FastAPI specific
+.pytest_cache/
+htmlcov/
+
+# Scientific data files (temporary processing)
+data/uploads/
+data/temp/
+*.raw
+*.dat
+*.txt
+!**/example.txt

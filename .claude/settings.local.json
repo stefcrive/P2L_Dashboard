@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(npm run build:frontend:*)",
+      "Bash(call backendvenvScriptsactivate)",
+      "Bash(pip install:*)",
+      "Bash(backendvenvScriptsactivate.bat)",
+      "Bash(powershell:*)",
+      "Bash(scriptsbackend-start.bat)",
+      "Bash(cmd /c:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

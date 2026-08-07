@@ -1,0 +1,39 @@
+{
+  "name": "irms-analyzer",
+  "version": "1.0.0",
+  "description": "IRMS (Isotope Ratio Mass Spectrometer) Output Analyzer Dashboard",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend",
+    "shared"
+  ],
+  "scripts": {
+    "dev": "npm run dev:local",
+    "dev:local": "powershell -ExecutionPolicy Bypass -File scripts/start-local.ps1",
+    "dev:both": "npm run dev:frontend & npm run dev:backend",
+    "dev:frontend": "npm run dev -w frontend",
+    "dev:backend": "npm run dev -w backend",
+    "supabase:start": "supabase start",
+    "supabase:stop": "supabase stop",
+    "supabase:status": "supabase status",
+    "supabase:reset": "supabase db reset",
+    "build": "npm run build:shared && npm run build:frontend",
+    "build:shared": "npm run build -w shared",
+    "build:frontend": "npm run build -w frontend",
+    "lint": "npm run lint -w frontend && npm run lint -w backend && npm run lint -w shared",
+    "test": "npm run test -w frontend && npm run test -w backend && npm run test -w shared",
+    "clean": "rm -rf node_modules frontend/node_modules backend/node_modules shared/node_modules"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.1",
+    "@types/node": "^20.10.6",
+    "prettier": "^3.1.1",
+    "supabase": "2.111.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=8.0.0"
+  }
+}

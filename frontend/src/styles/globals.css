@@ -1,0 +1,139 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 216 38% 97%;
+    --foreground: 216 44% 14%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 9%;
+    --primary: 216 72% 44%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 15%;
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 45%;
+    --accent: 214 45% 94%;
+    --accent-foreground: 216 58% 32%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 30% 89%;
+    --input: 214 32% 82%;
+    --ring: 214 64% 58%;
+    --success: 167 81% 31%;
+    --warning: 35 74% 49%;
+    --info: 191 74% 35%;
+    --special: 255 39% 53%;
+    --radius: 0.5rem;
+    --app-header-height: 104px;
+  }
+
+  .dark {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 96%;
+    --card: 222 47% 8%;
+    --card-foreground: 210 40% 96%;
+    --popover: 222 47% 8%;
+    --popover-foreground: 210 40% 96%;
+    --primary: 213 82% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 216 41% 22%;
+    --accent-foreground: 210 40% 96%;
+    --destructive: 0 63% 42%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 216 34% 20%;
+    --input: 215 25% 27%;
+    --ring: 213 82% 60%;
+    --success: 160 69% 42%;
+    --warning: 38 92% 50%;
+    --info: 189 85% 45%;
+    --special: 258 90% 72%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    background: hsl(var(--background));
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply min-h-screen bg-background text-foreground antialiased;
+    font-family: var(--font-body), 'Segoe UI', sans-serif;
+    font-size: 14px;
+  }
+
+  .dark body {
+    background-image: linear-gradient(180deg, #020617 0%, #0f172a 100%);
+    background-attachment: fixed;
+  }
+
+  h1,
+  h2,
+  h3,
+  .font-display {
+    font-family: var(--font-display), 'Segoe UI', sans-serif;
+  }
+
+  code,
+  kbd,
+  samp,
+  .font-mono {
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.18);
+  }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    @apply transition-colors duration-150;
+  }
+
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  @media (min-width: 768px) {
+    input,
+    select,
+    textarea {
+      font-size: 12px;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      scroll-behavior: auto !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
