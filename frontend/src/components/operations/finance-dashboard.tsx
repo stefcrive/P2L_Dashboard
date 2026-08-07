@@ -238,7 +238,49 @@ async function fetchInvoiceSettings(): Promise<InvoiceSettings> {
   return payload.data;
 }
 
-export function FinanceDashboard() {
+export type FinanceDashboardView = 'ledger' | 'create';
+
+function FinanceBreadcrumb({ view }: { view: FinanceDashboardView }) {
+  return (
+    <nav
+      aria-label="Breadcrumb"
+      className="flex items-center gap-1.5 text-xs text-muted-foreground"
+    >
+      <Link
+        href="/"
+        className="rounded-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        Overview
+      </Link>
+      <span aria-hidden="true">/</span>
+      {view === 'create' ? (
+        <>
+          <Link
+            href="/finance"
+            className="rounded-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            Finance
+          </Link>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page" className="font-medium text-foreground">
+            Create invoice
+          </span>
+        </>
+      ) : (
+        <span aria-current="page" className="font-medium text-foreground">
+          Finance
+        </span>
+      )}
+    </nav>
+  );
+}
+
+export function FinanceDashboard({
+  view = 'ledger',
+}: {
+  view?: FinanceDashboardView;
+}) {
+  const isCreateView = view === 'create';
   const queryClient = useQueryClient();
   const settingsApplied = useRef(false);
   const [search, setSearch] = useState('');
@@ -517,16 +559,35 @@ export function FinanceDashboard() {
 
   return (
     <div className="space-y-5">
+      <FinanceBreadcrumb view={view} />
       <PageHeader
-        title="Finance and invoices"
-        description="Issue branded PDF invoices, archive them against client records, and follow payment status from one ledger."
+        title={isCreateView ? 'Create invoice' : 'Finance and invoices'}
+        description={
+          isCreateView
+            ? 'Prepare a branded PDF invoice and archive it against the client record.'
+            : 'Follow payment status from the invoice ledger, or create a new invoice.'
+        }
         actions={
-          <Button variant="outline" size="sm" asChild>
-            <Link href="/settings">
-              <Settings2 className="mr-1.5 h-4 w-4" />
-              Invoice settings
-            </Link>
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {isCreateView ? (
+              <Button variant="outline" size="sm" asChild>
+                <Link href="/finance">Back to finance</Link>
+              </Button>
+            ) : (
+              <Button size="sm" asChild>
+                <Link href="/finance/invoices/new">
+                  <FilePlus2 className="mr-1.5 h-4 w-4" />
+                  Create invoice
+                </Link>
+              </Button>
+            )}
+            <Button variant="outline" size="sm" asChild>
+              <Link href="/settings">
+                <Settings2 className="mr-1.5 h-4 w-4" />
+                Invoice settings
+              </Link>
+            </Button>
+          </div>
         }
       />
 
