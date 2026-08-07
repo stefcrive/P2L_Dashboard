@@ -15,6 +15,7 @@ import {
   FlaskConical,
   LayoutDashboard,
   LibraryBig,
+  Settings,
   Users,
 } from 'lucide-react';
 
@@ -31,6 +32,7 @@ const navigation = [
   { href: '/lab-book', label: 'Lab book', icon: BookOpenCheck },
   { href: '/knowledge', label: 'Knowledge', icon: LibraryBig },
   { href: '/assistant', label: 'Assistant', icon: Bot },
+  { href: '/settings', label: 'Settings', icon: Settings },
 ] as const;
 
 type HeaderSummary = {

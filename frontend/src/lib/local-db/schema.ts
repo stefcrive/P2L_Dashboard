@@ -1,4 +1,4 @@
-export const LOCAL_APP_SCHEMA_VERSION = 3;
+export const LOCAL_APP_SCHEMA_VERSION = 4;
 
 export const LOCAL_APP_SCHEMA_SQL = `
 CREATE SCHEMA IF NOT EXISTS app_local;
@@ -286,6 +286,30 @@ CREATE TABLE IF NOT EXISTS public.client_invoices (
   CHECK (due_date IS NULL OR due_date >= issue_date)
 );
 
+CREATE TABLE IF NOT EXISTS public.invoice_settings (
+  id text PRIMARY KEY DEFAULT 'default' CHECK (id = 'default'),
+  issuer_details text NOT NULL DEFAULT '',
+  national_payment_details text NOT NULL DEFAULT '',
+  international_payment_details text NOT NULL DEFAULT '',
+  default_payment_instructions text NOT NULL DEFAULT 'both'
+    CHECK (default_payment_instructions IN ('national', 'international', 'both')),
+  default_currency text NOT NULL DEFAULT 'BRL'
+    CHECK (char_length(default_currency) = 3),
+  default_language text NOT NULL DEFAULT 'en'
+    CHECK (default_language IN ('en', 'pt')),
+  footer_note text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
+  updated_at timestamptz NOT NULL DEFAULT timezone('utc', now())
+);
+
+INSERT INTO public.invoice_settings (id, issuer_details, footer_note)
+VALUES (
+  'default',
+  E'Laboratório de Paleoceanografia e Paleoclimatologia (P2L)\\nEscola de Artes, Ciências e Humanidades\\nUniversidade de São Paulo\\nSão Paulo, Brazil',
+  'P2L · EACH-USP · Universidade de São Paulo'
+)
+ON CONFLICT (id) DO NOTHING;
+
 ALTER TABLE public.client_invoices
   ADD COLUMN IF NOT EXISTS tax_percent numeric(7, 3) NOT NULL DEFAULT 0
     CHECK (tax_percent >= 0),
@@ -444,6 +468,9 @@ FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 DROP TRIGGER IF EXISTS client_invoices_set_updated_at ON public.client_invoices;
 CREATE TRIGGER client_invoices_set_updated_at BEFORE UPDATE ON public.client_invoices
 FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+DROP TRIGGER IF EXISTS invoice_settings_set_updated_at ON public.invoice_settings;
+CREATE TRIGGER invoice_settings_set_updated_at BEFORE UPDATE ON public.invoice_settings
+FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 DROP TRIGGER IF EXISTS equipment_assets_set_updated_at ON public.equipment_assets;
 CREATE TRIGGER equipment_assets_set_updated_at BEFORE UPDATE ON public.equipment_assets
 FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -464,5 +491,9 @@ ON CONFLICT (version) DO NOTHING;
 
 INSERT INTO app_local.schema_migrations (version, description)
 VALUES (3, 'Add structured result files, measurements, and branded invoice fields')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (4, 'Add persistent invoice defaults and payment settings')
 ON CONFLICT (version) DO NOTHING;
 `;

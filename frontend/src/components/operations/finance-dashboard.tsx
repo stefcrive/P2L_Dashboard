@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import Link from 'next/link';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Download,
@@ -8,6 +9,7 @@ import {
   Plus,
   Save,
   Search,
+  Settings2,
   Trash2,
 } from 'lucide-react';
 
@@ -20,6 +22,10 @@ import {
 } from '@/components/dashboard/primitives';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  fallbackInvoiceSettings,
+  type InvoiceSettings,
+} from '@/lib/invoices/settings';
 import {
   Table,
   TableBody,
@@ -103,12 +109,25 @@ const initialDraft = {
   taxPercent: '0',
   serviceDescription: '',
   additionalInfo: '',
-  issuerDetails:
-    'Laboratório de Paleoceanografia e Paleoclimatologia (P2L)\nEscola de Artes, Ciências e Humanidades\nUniversidade de São Paulo\nSão Paulo, Brazil',
+  issuerDetails: fallbackInvoiceSettings.issuer_details,
   paymentInstructions: 'both' as 'national' | 'international' | 'both',
   nationalPaymentDetails: '',
   internationalPaymentDetails: '',
+  footerNote: fallbackInvoiceSettings.footer_note,
 };
+
+function draftWithSettings(settings: InvoiceSettings) {
+  return {
+    ...initialDraft,
+    language: settings.default_language,
+    currency: settings.default_currency,
+    issuerDetails: settings.issuer_details,
+    paymentInstructions: settings.default_payment_instructions,
+    nationalPaymentDetails: settings.national_payment_details,
+    internationalPaymentDetails: settings.international_payment_details,
+    footerNote: settings.footer_note,
+  };
+}
 
 function formatMoney(value: number, currency: string) {
   try {
@@ -213,8 +232,15 @@ async function readJson(response: Response) {
   return payload;
 }
 
+async function fetchInvoiceSettings(): Promise<InvoiceSettings> {
+  const response = await fetch('/api/invoice-settings', { cache: 'no-store' });
+  const payload = await readJson(response);
+  return payload.data;
+}
+
 export function FinanceDashboard() {
   const queryClient = useQueryClient();
+  const settingsApplied = useRef(false);
   const [search, setSearch] = useState('');
   const [draft, setDraft] = useState(initialDraft);
   const [items, setItems] = useState<InvoiceItemDraft[]>([createItem()]);
@@ -232,6 +258,27 @@ export function FinanceDashboard() {
     queryFn: () => fetchResource<Invoice>('invoices'),
     retry: false,
   });
+  const settingsQuery = useQuery({
+    queryKey: ['invoice-settings'],
+    queryFn: fetchInvoiceSettings,
+    retry: false,
+  });
+
+  useEffect(() => {
+    if (!settingsQuery.data || settingsApplied.current) return;
+    settingsApplied.current = true;
+    setDraft((current) => ({
+      ...current,
+      language: settingsQuery.data.default_language,
+      currency: settingsQuery.data.default_currency,
+      issuerDetails: settingsQuery.data.issuer_details,
+      paymentInstructions: settingsQuery.data.default_payment_instructions,
+      nationalPaymentDetails: settingsQuery.data.national_payment_details,
+      internationalPaymentDetails:
+        settingsQuery.data.international_payment_details,
+      footerNote: settingsQuery.data.footer_note,
+    }));
+  }, [settingsQuery.data]);
 
   const saveClientMutation = useMutation({
     mutationFn: async () =>
@@ -371,6 +418,7 @@ export function FinanceDashboard() {
       paymentInstructions: draft.paymentInstructions,
       nationalPaymentDetails: draft.nationalPaymentDetails,
       internationalPaymentDetails: draft.internationalPaymentDetails,
+      footerNote: draft.footerNote,
     };
   }
 
@@ -433,7 +481,7 @@ export function FinanceDashboard() {
         setMessage('Invoice issued, archived in the client record, and downloaded.');
         setMessageIsError(false);
         setDraft((current) => ({
-          ...initialDraft,
+          ...draftWithSettings(settingsQuery.data ?? fallbackInvoiceSettings),
           clientId: current.clientId,
           clientName: current.clientName,
           clientDetails: current.clientDetails,
@@ -472,6 +520,14 @@ export function FinanceDashboard() {
       <PageHeader
         title="Finance and invoices"
         description="Issue branded PDF invoices, archive them against client records, and follow payment status from one ledger."
+        actions={
+          <Button variant="outline" size="sm" asChild>
+            <Link href="/settings">
+              <Settings2 className="mr-1.5 h-4 w-4" />
+              Invoice settings
+            </Link>
+          </Button>
+        }
       />
 
       {invoicesQuery.isError || clientsQuery.isError ? (
