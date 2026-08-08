@@ -128,6 +128,12 @@ export interface MaterialsCatalogDataResponse {
   warnings: string[];
   availableTypes: MaterialType[];
   availableEquipment: string[];
+  equipmentOptions: Array<{
+    id: string;
+    assetCode: string;
+    name: string;
+    status: 'active' | 'service_due' | 'out_of_service' | 'retired';
+  }>;
   materials: MaterialInventoryRow[];
   purchaseLists: MaterialPurchaseListWithItems[];
   providers: Array<{ id: string; name: string }>;

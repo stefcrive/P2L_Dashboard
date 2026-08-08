@@ -45,14 +45,18 @@ export async function GET(_request: Request, { params }: RouteContext) {
     const { data, error } = await table
       .select(config.select)
       .order(config.orderColumn, { ascending: config.ascending ?? false })
-      .limit(250);
+      .limit(config.limit ?? 250);
 
     if (error) throw error;
     return NextResponse.json({
       data: data ?? [],
       source: getApplicationDatabaseSource(),
     });
-  } catch {
+  } catch (error) {
+    console.error(
+      `Failed to read operations resource ${params.resource}:`,
+      error
+    );
     return unavailableResponse();
   }
 }
@@ -137,6 +141,39 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     ) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
+    return unavailableResponse();
+  }
+}
+
+export async function DELETE(request: Request, { params }: RouteContext) {
+  if (!isResourceName(params.resource)) return invalidResource();
+  const config = resourceConfigs[params.resource];
+  if (config.readOnly) {
+    return NextResponse.json(
+      { error: 'This resource is read-only here.' },
+      { status: 405 }
+    );
+  }
+
+  try {
+    const id = new URL(request.url).searchParams.get('id');
+    if (!id) {
+      return NextResponse.json(
+        { error: 'A record id is required.' },
+        { status: 400 }
+      );
+    }
+
+    const supabase = getSupabaseAdminClient();
+    const table = supabase.from(config.table) as any;
+    const { error } = await table.delete().eq('id', id);
+    if (error) throw error;
+    return NextResponse.json({ message: 'Record deleted.' });
+  } catch (error) {
+    console.error(
+      `Failed to delete operations resource ${params.resource}:`,
+      error
+    );
     return unavailableResponse();
   }
 }

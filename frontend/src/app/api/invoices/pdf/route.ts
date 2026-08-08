@@ -94,6 +94,7 @@ function parsePayload(body: Record<string, unknown>): RequestPayload {
     internationalPaymentDetails: String(
       body.internationalPaymentDetails ?? ''
     ).trim(),
+    footerNote: String(body.footerNote ?? '').trim(),
   };
 }
 

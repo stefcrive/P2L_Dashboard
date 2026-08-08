@@ -39,6 +39,46 @@ export async function createEmbeddings(
     .map((item) => item.embedding);
 }
 
+export async function extractImageKnowledge(
+  buffer: Buffer,
+  mimeType: string,
+  sourceName: string,
+) {
+  const model =
+    getWorkspaceEnvironmentValue('OPENAI_VISION_MODEL') ||
+    getWorkspaceEnvironmentValue('OPENAI_MODEL') ||
+    'gpt-5.6-sol';
+  const response = await getOpenAIClient().responses.create({
+    model,
+    instructions: `Convert a laboratory image into faithful searchable source text.
+Transcribe every legible word, number, unit, label, table cell, handwritten annotation, and instrument message.
+Then describe relevant visual evidence such as equipment state, plots, sample labels, damage, connections, or warning indicators.
+Preserve uncertainty and mark illegible areas explicitly. Do not infer facts that are not visible.
+Use concise Markdown with sections titled Transcription and Visual evidence.`,
+    input: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: `Extract searchable knowledge from ${sourceName}.`,
+          },
+          {
+            type: 'input_image',
+            image_url: `data:${mimeType};base64,${buffer.toString('base64')}`,
+            detail: 'original',
+          },
+        ],
+      },
+    ],
+    reasoning: { effort: 'low' },
+    text: { verbosity: 'medium' },
+  });
+  const text = response.output_text.trim();
+  if (!text) throw new Error('The image model returned no extractable content.');
+  return text;
+}
+
 const enrichmentSchema = {
   type: 'object',
   properties: {

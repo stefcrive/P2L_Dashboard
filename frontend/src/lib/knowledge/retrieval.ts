@@ -117,7 +117,11 @@ async function hydrateEvidence(
      FROM kb.chunks c
      JOIN kb.messages m ON m.id = c.message_id
      JOIN kb.sources s ON s.id = c.source_id
-     WHERE c.id IN (${placeholders})`,
+     WHERE c.id IN (${placeholders})
+       AND NOT EXISTS (
+         SELECT 1 FROM kb.review_items r
+         WHERE r.message_id = c.message_id AND r.status = 'quarantined'
+       )`,
     ids,
   );
   const byId = new Map(result.rows.map((row) => [Number(row.chunk_id), row]));
@@ -161,7 +165,11 @@ export async function hybridRetrieve(question: string, limit = 40) {
        (2 * ts_rank_cd(c.search_vector, query.precise, 32)) +
        ts_rank_cd(c.search_vector, query.broad, 32) AS score
      FROM kb.chunks c, query
-     WHERE c.search_vector @@ query.precise OR c.search_vector @@ query.broad
+     WHERE (c.search_vector @@ query.precise OR c.search_vector @@ query.broad)
+       AND NOT EXISTS (
+         SELECT 1 FROM kb.review_items r
+         WHERE r.message_id = c.message_id AND r.status = 'quarantined'
+       )
      ORDER BY score DESC, c.id
      LIMIT $3`,
     [question, broadTsQuery(question), limit],
@@ -184,10 +192,15 @@ export async function hybridRetrieve(question: string, limit = 40) {
       config.embeddingDimensions,
     );
     const semanticResult = await database.query<{ id: number; score: number }>(
-      `SELECT id, 1 - (embedding <=> $1::vector) AS score
-       FROM kb.chunks
-       WHERE embedding IS NOT NULL AND embedding_model = $2
-       ORDER BY embedding <=> $1::vector
+      `SELECT c.id, 1 - (c.embedding <=> $1::vector) AS score
+       FROM kb.chunks c
+       WHERE c.embedding IS NOT NULL AND c.embedding_model = $2
+         AND NOT EXISTS (
+           SELECT 1 FROM kb.review_items r
+           WHERE r.message_id = c.message_id
+             AND r.status = 'quarantined'
+         )
+       ORDER BY c.embedding <=> $1::vector
        LIMIT $3`,
       [asVectorLiteral(queryEmbedding), embeddingModel, limit],
     );
@@ -212,7 +225,11 @@ export async function hybridRetrieve(question: string, limit = 40) {
          (${conditions.map((condition) => `CASE WHEN ${condition} THEN 1 ELSE 0 END`).join(' + ')})
            AS score
        FROM kb.chunks c
-       WHERE ${conditions.join(' OR ')}
+       WHERE (${conditions.join(' OR ')})
+         AND NOT EXISTS (
+           SELECT 1 FROM kb.review_items r
+           WHERE r.message_id = c.message_id AND r.status = 'quarantined'
+         )
        ORDER BY score DESC, c.id
        LIMIT $${params.length}`,
       params,

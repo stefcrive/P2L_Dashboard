@@ -21,7 +21,7 @@ import {
 const compactSuggestions = [
   'Summarize anything that needs attention',
   'Which consumables are low on stock?',
-  'Create an operations status report',
+  '/knowledge How should I troubleshoot an IRMS leak?',
 ];
 
 export function TradingChatAssistant() {
@@ -168,8 +168,8 @@ export function TradingChatAssistant() {
             <ChatComposer
               compact
               pending={pending}
-              onSend={(message) =>
-                sendAssistantMessage(message, conversation?.id)
+              onSend={(message, files) =>
+                sendAssistantMessage(message, conversation?.id, files)
               }
             />
           </footer>

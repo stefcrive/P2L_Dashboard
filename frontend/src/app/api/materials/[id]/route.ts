@@ -110,3 +110,28 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     material: data as MaterialInventoryRow,
   });
 }
+
+export async function DELETE(_request: Request, { params }: RouteContext) {
+  const database = getSupabaseAdminClient();
+  const { data: material, error: readError } = await database
+    .from('materials_inventory')
+    .select('id, name')
+    .eq('id', params.id)
+    .single();
+  if (readError || !material) {
+    return NextResponse.json({ error: 'Material not found.' }, { status: 404 });
+  }
+
+  const { error } = await database
+    .from('materials_inventory')
+    .delete()
+    .eq('id', params.id);
+  if (error) {
+    return NextResponse.json(
+      { error: `Unable to delete material: ${error.message}` },
+      { status: 500 }
+    );
+  }
+
+  return NextResponse.json({ message: `${material.name} deleted from the catalog.` });
+}

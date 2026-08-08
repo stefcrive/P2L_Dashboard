@@ -16,6 +16,7 @@ type ResourceConfig = {
   table: string;
   select: string;
   orderColumn: string;
+  limit?: number;
   ascending?: boolean;
   readOnly?: boolean;
   required: string[];
@@ -118,18 +119,27 @@ export const resourceConfigs: Record<ResourceName, ResourceConfig> = {
   'lab-book': {
     table: 'lab_book_entries',
     select:
-      'id, entry_type, title, occurred_at, asset_id, provider_id, status, performed_by, description, next_due_at, attachment_path, created_at, updated_at, asset:equipment_assets(id, asset_code, name), provider:providers(id, name)',
+      'id, source_key, entry_type, title, occurred_at, date_precision, reported_at, asset_id, provider_id, status, performed_by, description, source_reference, subject, institution, project_reference, material, quantity, next_due_at, attachment_path, created_at, updated_at, asset:equipment_assets(id, asset_code, name), provider:providers(id, name)',
     orderColumn: 'occurred_at',
+    limit: 1000,
     required: ['title', 'entry_type', 'occurred_at'],
     writable: [
       'entry_type',
       'title',
       'occurred_at',
+      'date_precision',
+      'reported_at',
       'asset_id',
       'provider_id',
       'status',
       'performed_by',
       'description',
+      'source_reference',
+      'subject',
+      'institution',
+      'project_reference',
+      'material',
+      'quantity',
       'next_due_at',
       'attachment_path',
     ],

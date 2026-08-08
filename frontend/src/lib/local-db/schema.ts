@@ -1,4 +1,4 @@
-export const LOCAL_APP_SCHEMA_VERSION = 4;
+export const LOCAL_APP_SCHEMA_VERSION = 8;
 
 export const LOCAL_APP_SCHEMA_SQL = `
 CREATE SCHEMA IF NOT EXISTS app_local;
@@ -7,6 +7,12 @@ CREATE TABLE IF NOT EXISTS app_local.schema_migrations (
   version integer PRIMARY KEY,
   description text NOT NULL,
   applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS app_local.lab_book_history_imports (
+  import_key text PRIMARY KEY,
+  record_count integer NOT NULL DEFAULT 0,
+  imported_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE OR REPLACE FUNCTION public.set_updated_at()
@@ -56,6 +62,17 @@ CREATE TABLE IF NOT EXISTS public.client_documents (
     CHECK (storage_origin IN ('folder', 'upload')),
   created_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
   updated_at timestamptz NOT NULL DEFAULT timezone('utc', now())
+);
+
+CREATE TABLE IF NOT EXISTS public.assistant_uploads (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  file_name text NOT NULL,
+  mime_type text NOT NULL DEFAULT 'application/octet-stream',
+  file_size_bytes bigint NOT NULL CHECK (file_size_bytes > 0),
+  content_sha256 text NOT NULL,
+  content bytea NOT NULL,
+  attached_document_id uuid REFERENCES public.client_documents(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT timezone('utc', now())
 );
 
 CREATE TABLE IF NOT EXISTS public.client_credit_events (
@@ -156,6 +173,27 @@ ALTER TABLE public.client_credit_events
 ALTER TABLE public.client_credit_events
   ADD CONSTRAINT client_credit_events_event_type_check
   CHECK (event_type IN ('analysis', 'credit_topup', 'adjustment'));
+
+UPDATE public.client_credit_events
+SET amount = CASE
+  WHEN event_type = 'analysis' THEN -abs(amount)
+  WHEN event_type = 'credit_topup' THEN abs(amount)
+  ELSE amount
+END
+WHERE amount IS NOT NULL
+  AND event_type IN ('analysis', 'credit_topup');
+
+ALTER TABLE public.client_credit_events
+  DROP CONSTRAINT IF EXISTS client_credit_events_amount_sign_check;
+
+ALTER TABLE public.client_credit_events
+  ADD CONSTRAINT client_credit_events_amount_sign_check
+  CHECK (
+    amount IS NULL
+    OR event_type = 'adjustment'
+    OR (event_type = 'analysis' AND amount <= 0)
+    OR (event_type = 'credit_topup' AND amount >= 0)
+  );
 
 ALTER TABLE public.materials_inventory
   ADD COLUMN IF NOT EXISTS availability_status text NOT NULL DEFAULT 'available'
@@ -310,6 +348,17 @@ VALUES (
 )
 ON CONFLICT (id) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS public.gmail_connections (
+  id text PRIMARY KEY DEFAULT 'default' CHECK (id = 'default'),
+  email text NOT NULL,
+  access_token_encrypted text NOT NULL,
+  refresh_token_encrypted text NOT NULL,
+  expires_at timestamptz NOT NULL,
+  scope text NOT NULL,
+  connected_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
+  updated_at timestamptz NOT NULL DEFAULT timezone('utc', now())
+);
+
 ALTER TABLE public.client_invoices
   ADD COLUMN IF NOT EXISTS tax_percent numeric(7, 3) NOT NULL DEFAULT 0
     CHECK (tax_percent >= 0),
@@ -373,6 +422,39 @@ CREATE TABLE IF NOT EXISTS public.lab_book_entries (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE public.lab_book_entries
+  ADD COLUMN IF NOT EXISTS source_key text,
+  ADD COLUMN IF NOT EXISTS date_precision text NOT NULL DEFAULT 'day',
+  ADD COLUMN IF NOT EXISTS reported_at timestamptz,
+  ADD COLUMN IF NOT EXISTS source_reference text,
+  ADD COLUMN IF NOT EXISTS subject text,
+  ADD COLUMN IF NOT EXISTS institution text,
+  ADD COLUMN IF NOT EXISTS project_reference text,
+  ADD COLUMN IF NOT EXISTS material text,
+  ADD COLUMN IF NOT EXISTS quantity integer;
+
+ALTER TABLE public.lab_book_entries
+  DROP CONSTRAINT IF EXISTS lab_book_entries_entry_type_check;
+ALTER TABLE public.lab_book_entries
+  ADD CONSTRAINT lab_book_entries_entry_type_check
+  CHECK (entry_type IN (
+    'publication', 'masters_delivery', 'phd_delivery', 'results_delivery',
+    'maintenance', 'calibration', 'incident', 'quality_control', 'software',
+    'infrastructure', 'general'
+  ));
+
+ALTER TABLE public.lab_book_entries
+  DROP CONSTRAINT IF EXISTS lab_book_entries_date_precision_check;
+ALTER TABLE public.lab_book_entries
+  ADD CONSTRAINT lab_book_entries_date_precision_check
+  CHECK (date_precision IN ('day', 'month', 'year', 'cutoff', 'estimated'));
+
+ALTER TABLE public.lab_book_entries
+  DROP CONSTRAINT IF EXISTS lab_book_entries_quantity_check;
+ALTER TABLE public.lab_book_entries
+  ADD CONSTRAINT lab_book_entries_quantity_check
+  CHECK (quantity IS NULL OR quantity >= 0);
+
 CREATE TABLE IF NOT EXISTS public.backup_records (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   system_name text NOT NULL,
@@ -399,6 +481,11 @@ CREATE INDEX IF NOT EXISTS client_documents_client_idx ON public.client_document
 CREATE INDEX IF NOT EXISTS client_documents_year_idx ON public.client_documents (year);
 CREATE INDEX IF NOT EXISTS client_documents_client_created_idx
   ON public.client_documents (client_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS assistant_uploads_created_idx
+  ON public.assistant_uploads (created_at DESC);
+CREATE INDEX IF NOT EXISTS assistant_uploads_document_idx
+  ON public.assistant_uploads (attached_document_id)
+  WHERE attached_document_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS materials_inventory_provider_idx
   ON public.materials_inventory (provider_id);
 CREATE INDEX IF NOT EXISTS client_credit_events_client_date_idx
@@ -435,6 +522,10 @@ CREATE INDEX IF NOT EXISTS lab_book_asset_idx ON public.lab_book_entries (asset_
 CREATE INDEX IF NOT EXISTS lab_book_provider_idx ON public.lab_book_entries (provider_id);
 CREATE INDEX IF NOT EXISTS lab_book_occurred_idx
   ON public.lab_book_entries (entry_type, occurred_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS lab_book_source_key_unique_idx
+  ON public.lab_book_entries (source_key) WHERE source_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS lab_book_subject_idx
+  ON public.lab_book_entries (subject, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS backup_records_started_idx
   ON public.backup_records (status, started_at DESC);
 
@@ -471,6 +562,9 @@ FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 DROP TRIGGER IF EXISTS invoice_settings_set_updated_at ON public.invoice_settings;
 CREATE TRIGGER invoice_settings_set_updated_at BEFORE UPDATE ON public.invoice_settings
 FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+DROP TRIGGER IF EXISTS gmail_connections_set_updated_at ON public.gmail_connections;
+CREATE TRIGGER gmail_connections_set_updated_at BEFORE UPDATE ON public.gmail_connections
+FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 DROP TRIGGER IF EXISTS equipment_assets_set_updated_at ON public.equipment_assets;
 CREATE TRIGGER equipment_assets_set_updated_at BEFORE UPDATE ON public.equipment_assets
 FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -487,6 +581,22 @@ ON CONFLICT (version) DO NOTHING;
 
 INSERT INTO app_local.schema_migrations (version, description)
 VALUES (2, 'Persist client document content and extend editable material records')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (5, 'Expand the lab book for reconstructed scientific output and provenance')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (6, 'Stage assistant uploads for later attachment and result import')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (7, 'Add encrypted Gmail OAuth connection for assistant email tools')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (8, 'Normalize credit ledger signs and enforce event-specific amounts')
 ON CONFLICT (version) DO NOTHING;
 
 INSERT INTO app_local.schema_migrations (version, description)

@@ -16,11 +16,8 @@ import {
 } from 'lucide-react';
 
 import {
-  MetricRail,
-  MetricTile,
   PageHeader,
   StatusPill,
-  Toolbar,
 } from '@/components/dashboard/primitives';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -162,6 +159,26 @@ function materialToForm(material: MaterialInventoryRow): MaterialFormState {
   };
 }
 
+function emptyMaterialForm(): MaterialFormState {
+  return {
+    name: '',
+    partNumber: '',
+    description: '',
+    materialType: 'consumable',
+    equipment: '',
+    availabilityStatus: 'available',
+    currentStock: '0',
+    minimumStock: '0',
+    suggestedStock: '1',
+    unit: 'unit',
+    unitCost: '',
+    currency: 'BRL',
+    providerId: '',
+    storageLocation: '',
+    notes: '',
+  };
+}
+
 function purchaseListToForm(
   purchaseList: MaterialPurchaseListWithItems
 ): PurchaseListFormState {
@@ -201,11 +218,11 @@ async function saveMaterial({
   id,
   form,
 }: {
-  id: string;
+  id: string | null;
   form: MaterialFormState;
 }): Promise<{ message: string }> {
-  const response = await fetch(`/api/materials/${id}`, {
-    method: 'PATCH',
+  const response = await fetch(id ? `/api/materials/${id}` : '/api/materials', {
+    method: id ? 'PATCH' : 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(form),
   });
@@ -213,9 +230,20 @@ async function saveMaterial({
     | { message?: string; error?: string }
     | null;
   if (!response.ok) {
-    throw new Error(payload?.error ?? 'Unable to update material.');
+    throw new Error(payload?.error ?? 'Unable to save material.');
   }
-  return { message: payload?.message ?? 'Material updated.' };
+  return { message: payload?.message ?? 'Material saved.' };
+}
+
+async function deleteMaterial(id: string): Promise<{ message: string }> {
+  const response = await fetch(`/api/materials/${id}`, { method: 'DELETE' });
+  const payload = (await response.json().catch(() => null)) as
+    | { message?: string; error?: string }
+    | null;
+  if (!response.ok) {
+    throw new Error(payload?.error ?? 'Unable to delete material.');
+  }
+  return { message: payload?.message ?? 'Material deleted.' };
 }
 
 async function createPurchaseList(payload: {
@@ -301,10 +329,25 @@ export function MaterialsDashboard() {
   });
   const data = materialsQuery.data;
   const materials = useMemo(() => data?.materials ?? [], [data?.materials]);
+  const equipmentNames = useMemo(
+    () => (data?.equipmentOptions ?? []).map((equipment) => equipment.name),
+    [data?.equipmentOptions]
+  );
   const draftItemsArray = useMemo(() => Object.values(draftItems), [draftItems]);
 
   const materialMutation = useMutation({
     mutationFn: saveMaterial,
+    onError: (error: Error) => setStatusMessage(error.message),
+    onSuccess: async (payload) => {
+      setStatusMessage(payload.message);
+      setSelectedMaterial(null);
+      setMaterialForm(null);
+      await queryClient.invalidateQueries({ queryKey: ['materials'] });
+    },
+  });
+
+  const deleteMaterialMutation = useMutation({
+    mutationFn: deleteMaterial,
     onError: (error: Error) => setStatusMessage(error.message),
     onSuccess: async (payload) => {
       setStatusMessage(payload.message);
@@ -347,6 +390,22 @@ export function MaterialsDashboard() {
   function openMaterial(material: MaterialInventoryRow) {
     setSelectedMaterial(material);
     setMaterialForm(materialToForm(material));
+  }
+
+  function openNewMaterial() {
+    setSelectedMaterial(null);
+    setMaterialForm(emptyMaterialForm());
+  }
+
+  function removeMaterial(material: MaterialInventoryRow) {
+    if (
+      !window.confirm(
+        `Delete "${material.name}" from the catalog? Its stock history will also be removed.`
+      )
+    ) {
+      return;
+    }
+    deleteMaterialMutation.mutate(material.id);
   }
 
   function openPurchaseList(purchaseList: MaterialPurchaseListWithItems) {
@@ -452,95 +511,6 @@ export function MaterialsDashboard() {
         </p>
       ) : null}
 
-      <MetricRail className="md:grid-cols-4">
-        <MetricTile
-          label="Materials"
-          value={data?.stats.totalMaterials ?? 0}
-          detail="Cataloged records"
-          tone="primary"
-        />
-        <MetricTile
-          label="Consumables"
-          value={data?.stats.totalConsumables ?? 0}
-          detail="Routine laboratory items"
-        />
-        <MetricTile
-          label="Low stock"
-          value={data?.stats.lowStockConsumables ?? 0}
-          detail="At or below minimum"
-          tone={data?.stats.lowStockConsumables ? 'warning' : 'success'}
-        />
-        <MetricTile
-          label="Requests"
-          value={data?.stats.totalPurchaseLists ?? 0}
-          detail="Saved purchase lists"
-          tone="special"
-        />
-      </MetricRail>
-
-      <Toolbar>
-        <div className="grid gap-3 md:grid-cols-4">
-          <div className="relative md:col-span-2">
-            <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input
-              value={filters.search}
-              onChange={(event) =>
-                setFilters((previous) => ({ ...previous, search: event.target.value }))
-              }
-              placeholder="Search material, part number, equipment or source"
-              className="pl-9"
-            />
-          </div>
-          <select
-            value={filters.type}
-            onChange={(event) =>
-              setFilters((previous) => ({
-                ...previous,
-                type: event.target.value as FiltersState['type'],
-              }))
-            }
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-          >
-            <option value="all">All categories</option>
-            {(data?.availableTypes ?? []).map((type) => (
-              <option key={type} value={type}>
-                {materialTypeLabel[type]}
-              </option>
-            ))}
-          </select>
-          <select
-            value={filters.equipment}
-            onChange={(event) =>
-              setFilters((previous) => ({
-                ...previous,
-                equipment: event.target.value,
-              }))
-            }
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-          >
-            <option value="all">All destinations</option>
-            {(data?.availableEquipment ?? []).map((equipment) => (
-              <option key={equipment} value={equipment}>
-                {equipment}
-              </option>
-            ))}
-          </select>
-        </div>
-        <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={filters.lowStockOnly}
-            onChange={(event) =>
-              setFilters((previous) => ({
-                ...previous,
-                lowStockOnly: event.target.checked,
-              }))
-            }
-          />
-          Only show low-stock consumables
-        </label>
-      </Toolbar>
-
       {materialsQuery.isError ? (
         <Card>
           <CardContent className="text-sm text-destructive">
@@ -551,16 +521,88 @@ export function MaterialsDashboard() {
 
       <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         <Card className="min-w-0 overflow-hidden">
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <div>
-              <CardTitle>Cataloged materials</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Drag a row into the purchase request, or click it to edit its record.
-              </p>
+          <CardHeader className="space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <CardTitle>Cataloged materials</CardTitle>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Search the catalog, drag a row into the purchase request, or click it to edit.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="rounded-md border bg-muted/35 px-2.5 py-1.5 font-mono text-xs text-muted-foreground">
+                  {materials.length} shown
+                </div>
+                <Button size="sm" onClick={openNewMaterial}>
+                  <Plus className="mr-1.5 h-4 w-4" />
+                  Add item
+                </Button>
+              </div>
             </div>
-            <span className="font-mono text-xs text-muted-foreground">
-              {materials.length} shown
-            </span>
+
+            <div className="grid gap-3 md:grid-cols-4">
+              <div className="relative md:col-span-2">
+                <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  value={filters.search}
+                  onChange={(event) =>
+                    setFilters((previous) => ({
+                      ...previous,
+                      search: event.target.value,
+                    }))
+                  }
+                  placeholder="Search material, part number, equipment or source"
+                  className="pl-9"
+                />
+              </div>
+              <select
+                value={filters.type}
+                onChange={(event) =>
+                  setFilters((previous) => ({
+                    ...previous,
+                    type: event.target.value as FiltersState['type'],
+                  }))
+                }
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              >
+                <option value="all">All categories</option>
+                {(data?.availableTypes ?? []).map((type) => (
+                  <option key={type} value={type}>
+                    {materialTypeLabel[type]}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={filters.equipment}
+                onChange={(event) =>
+                  setFilters((previous) => ({
+                    ...previous,
+                    equipment: event.target.value,
+                  }))
+                }
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              >
+                <option value="all">All destinations</option>
+                {(data?.availableEquipment ?? []).map((equipment) => (
+                  <option key={equipment} value={equipment}>
+                    {equipment}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={filters.lowStockOnly}
+                onChange={(event) =>
+                  setFilters((previous) => ({
+                    ...previous,
+                    lowStockOnly: event.target.checked,
+                  }))
+                }
+              />
+              Only show low-stock consumables
+            </label>
           </CardHeader>
           <CardContent className="max-h-[720px] overflow-auto p-0">
             <Table className="min-w-[790px] table-fixed">
@@ -1039,7 +1081,7 @@ export function MaterialsDashboard() {
         </div>
       ) : null}
 
-      {selectedMaterial && materialForm ? (
+      {materialForm ? (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-[2px]"
           role="dialog"
@@ -1056,13 +1098,15 @@ export function MaterialsDashboard() {
             <div className="sticky top-0 z-10 flex items-start justify-between border-b bg-background px-5 py-4">
               <div>
                 <p className="font-mono text-[10px] uppercase tracking-wide text-primary">
-                  Material record
+                  {selectedMaterial ? 'Material record' : 'New catalog item'}
                 </p>
                 <h2 id="material-record-title" className="font-display text-lg font-semibold">
-                  {selectedMaterial.name}
+                  {selectedMaterial?.name ?? 'Add material'}
                 </h2>
                 <p className="text-xs text-muted-foreground">
-                  Source: {selectedMaterial.source_file}
+                  {selectedMaterial
+                    ? `Source: ${selectedMaterial.source_file}`
+                    : 'Create a stock-controlled item for the laboratory catalog.'}
                 </p>
               </div>
               <Button
@@ -1104,12 +1148,31 @@ export function MaterialsDashboard() {
                 </select>
               </FormField>
               <FormField label="Equipment destination">
-                <Input
+                <select
                   value={materialForm.equipment}
                   onChange={(event) =>
                     setMaterialForm({ ...materialForm, equipment: event.target.value })
                   }
-                />
+                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  <option value="">General lab</option>
+                  {materialForm.equipment &&
+                  !equipmentNames.includes(materialForm.equipment) ? (
+                    <option value={materialForm.equipment}>
+                      {materialForm.equipment} (legacy)
+                    </option>
+                  ) : null}
+                  {(data?.equipmentOptions ?? []).map((equipment) => (
+                    <option key={equipment.id} value={equipment.name}>
+                      {equipment.assetCode} · {equipment.name}
+                    </option>
+                  ))}
+                </select>
+                {!data?.equipmentOptions?.length ? (
+                  <span className="block text-[10px] normal-case tracking-normal text-amber-700 dark:text-amber-300">
+                    Add equipment in Settings to populate this list.
+                  </span>
+                ) : null}
               </FormField>
               <FormField label="Part number">
                 <Input
@@ -1138,16 +1201,12 @@ export function MaterialsDashboard() {
                   ))}
                 </select>
               </FormField>
-              <FormField label="Current stock">
-                <Input
-                  type="number"
-                  min="0"
-                  value={materialForm.currentStock}
-                  onChange={(event) =>
-                    setMaterialForm({ ...materialForm, currentStock: event.target.value })
-                  }
-                />
-              </FormField>
+              <StockAvailabilityControl
+                form={materialForm}
+                onChange={(currentStock) =>
+                  setMaterialForm({ ...materialForm, currentStock })
+                }
+              />
               <FormField label="Minimum stock">
                 <Input
                   type="number"
@@ -1245,7 +1304,20 @@ export function MaterialsDashboard() {
                 />
               </FormField>
             </div>
-            <div className="sticky bottom-0 flex justify-end gap-2 border-t bg-background px-5 py-3">
+            <div className="sticky bottom-0 flex items-center gap-2 border-t bg-background px-5 py-3">
+              {selectedMaterial ? (
+                <Button
+                  variant="outline"
+                  className="mr-auto border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950"
+                  disabled={deleteMaterialMutation.isPending}
+                  onClick={() => removeMaterial(selectedMaterial)}
+                >
+                  <Trash2 className="mr-1.5 h-4 w-4" />
+                  Delete from catalog
+                </Button>
+              ) : (
+                <span className="mr-auto" />
+              )}
               <Button
                 variant="outline"
                 onClick={() => {
@@ -1256,19 +1328,124 @@ export function MaterialsDashboard() {
                 Cancel
               </Button>
               <Button
-                disabled={materialMutation.isPending}
+                disabled={materialMutation.isPending || !materialForm.name.trim()}
                 onClick={() =>
-                  materialMutation.mutate({ id: selectedMaterial.id, form: materialForm })
+                  materialMutation.mutate({
+                    id: selectedMaterial?.id ?? null,
+                    form: materialForm,
+                  })
                 }
               >
                 <Save className="mr-1.5 h-4 w-4" />
-                Save material
+                {selectedMaterial ? 'Save material' : 'Add to catalog'}
               </Button>
             </div>
           </div>
         </div>
       ) : null}
     </div>
+  );
+}
+
+function StockAvailabilityControl({
+  form,
+  onChange,
+}: {
+  form: MaterialFormState;
+  onChange: (currentStock: string) => void;
+}) {
+  const minimum = Math.max(0, Number(form.minimumStock) || 0);
+  const requestedTarget = Math.max(0, Number(form.suggestedStock) || 0);
+  const target = Math.max(requestedTarget, minimum + 1);
+  const rawCurrent = Math.max(0, Number(form.currentStock) || 0);
+  const sliderCurrent = Math.min(target, Math.max(minimum, rawCurrent));
+  const range = target - minimum;
+  const percentage = range > 0 ? ((sliderCurrent - minimum) / range) * 100 : 0;
+  const isBelowMinimum = rawCurrent < minimum;
+  const isAtTarget = rawCurrent >= target;
+
+  return (
+    <fieldset className="sm:col-span-2 rounded-lg border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-950/45">
+      <legend className="px-1 font-mono text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+        Stock availability
+      </legend>
+      <div className="flex items-end justify-between gap-4">
+        <div>
+          <p className="text-xs text-muted-foreground">Current stock</p>
+          <p className="font-display text-2xl font-semibold tabular-nums">
+            {formatNumber(rawCurrent)}
+            <span className="ml-1 text-xs font-normal text-muted-foreground">
+              {form.unit || 'units'}
+            </span>
+          </p>
+        </div>
+        <Badge
+          variant="secondary"
+          className={cn(
+            isBelowMinimum
+              ? 'border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200'
+              : isAtTarget
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200'
+                : 'border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-200'
+          )}
+        >
+          {isBelowMinimum
+            ? 'Below minimum'
+            : isAtTarget
+              ? 'Target reached'
+              : `${Math.round(percentage)}% of range`}
+        </Badge>
+      </div>
+
+      <div className="relative mt-5">
+        <div
+          className="pointer-events-none absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800"
+          aria-hidden="true"
+        >
+          <div
+            className={cn(
+              'h-full rounded-full transition-[width]',
+              isBelowMinimum
+                ? 'bg-rose-500'
+                : isAtTarget
+                  ? 'bg-emerald-500'
+                  : 'bg-blue-500'
+            )}
+            style={{ width: `${percentage}%` }}
+          />
+        </div>
+        <input
+          type="range"
+          min={minimum}
+          max={target}
+          step="1"
+          value={sliderCurrent}
+          onChange={(event) => onChange(event.target.value)}
+          className="relative h-7 w-full cursor-ew-resize appearance-none bg-transparent accent-blue-600"
+          aria-label="Current stock"
+          aria-valuetext={`${sliderCurrent} ${form.unit || 'units'}`}
+        />
+      </div>
+      <div className="flex items-center justify-between font-mono text-[10px] text-muted-foreground">
+        <span>
+          Minimum <strong className="text-foreground">{formatNumber(minimum)}</strong>
+        </span>
+        <span>
+          Target <strong className="text-foreground">{formatNumber(target)}</strong>
+        </span>
+      </div>
+      <label className="mt-3 flex items-center gap-2 text-xs font-medium">
+        Exact current stock
+        <Input
+          type="number"
+          min="0"
+          step="1"
+          value={form.currentStock}
+          onChange={(event) => onChange(event.target.value)}
+          className="ml-auto w-28"
+        />
+      </label>
+    </fieldset>
   );
 }
 

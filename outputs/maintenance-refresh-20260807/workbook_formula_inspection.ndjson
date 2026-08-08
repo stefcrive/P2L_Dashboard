@@ -1,0 +1,11 @@
+{"kind":"formula","sheet":"Summary","address":"B5","formula":"=COUNTA(Materials!$B$2:$B$124)"}
+{"kind":"formula","sheet":"Summary","address":"B6","formula":"=COUNTIF(Materials!$A$2:$A$124,\"consumable\")"}
+{"kind":"formula","sheet":"Summary","address":"B7","formula":"=COUNTIF(Materials!$A$2:$A$124,\"spare_part\")"}
+{"kind":"formula","sheet":"Summary","address":"B8","formula":"=COUNTIF(Materials!$A$2:$A$124,\"equipment\")"}
+{"kind":"formula","sheet":"Summary","address":"B9","formula":"=COUNTIF(Materials!$A$2:$A$124,\"other\")"}
+{"kind":"formula","sheet":"Summary","address":"B10","formula":"=COUNTA(Providers!$A$2:$A$11)"}
+{"kind":"formula","sheet":"Summary","address":"B11","formula":"=COUNTA('Source Audit'!$A$2:$A$28)"}
+{"kind":"formula","sheet":"Summary","address":"B12","formula":"=COUNT(Materials!$G$2:$G$124)"}
+{"kind":"formula","sheet":"Summary","address":"B15","formula":"=IF(B5=123,\"PASS\",\"CHECK\")"}
+{"kind":"formula","sheet":"Summary","address":"B16","formula":"=IF(B11=27,\"PASS\",\"CHECK\")"}
+{"kind":"formula","sheet":"Summary","address":"B17","formula":"=IF(B12=0,\"PASS\",\"CHECK\")"}

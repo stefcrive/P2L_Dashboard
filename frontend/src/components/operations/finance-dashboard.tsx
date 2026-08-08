@@ -191,7 +191,10 @@ function validateInvoiceDraft(
     });
   }
   if (!draft.issuerDetails.trim()) {
-    missing.push({ label: 'issuer details', fieldId: 'invoice-issuer-details' });
+    missing.push({
+      label: 'issuer details',
+      fieldId: 'invoice-issuer-details',
+    });
   }
   return missing;
 }
@@ -240,7 +243,15 @@ async function fetchInvoiceSettings(): Promise<InvoiceSettings> {
 
 export type FinanceDashboardView = 'ledger' | 'create';
 
-function FinanceBreadcrumb({ view }: { view: FinanceDashboardView }) {
+function FinanceBreadcrumb({
+  view,
+  clientId,
+  clientName,
+}: {
+  view: FinanceDashboardView;
+  clientId?: string;
+  clientName?: string;
+}) {
   return (
     <nav
       aria-label="Breadcrumb"
@@ -256,19 +267,29 @@ function FinanceBreadcrumb({ view }: { view: FinanceDashboardView }) {
       {view === 'create' ? (
         <>
           <Link
-            href="/finance"
+            href="/clients"
             className="rounded-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            Finance
+            Clients
+          </Link>
+          <span aria-hidden="true">/</span>
+          <Link
+            href={{
+              pathname: '/clients',
+              query: clientId ? { clientId } : undefined,
+            }}
+            className="max-w-52 truncate rounded-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {clientName || 'Client record'}
           </Link>
           <span aria-hidden="true">/</span>
           <span aria-current="page" className="font-medium text-foreground">
-            Create invoice
+            Add invoice
           </span>
         </>
       ) : (
         <span aria-current="page" className="font-medium text-foreground">
-          Finance
+          Invoices
         </span>
       )}
     </nav>
@@ -277,12 +298,15 @@ function FinanceBreadcrumb({ view }: { view: FinanceDashboardView }) {
 
 export function FinanceDashboard({
   view = 'ledger',
+  clientId,
 }: {
   view?: FinanceDashboardView;
+  clientId?: string;
 }) {
   const isCreateView = view === 'create';
   const queryClient = useQueryClient();
   const settingsApplied = useRef(false);
+  const clientApplied = useRef(false);
   const [search, setSearch] = useState('');
   const [draft, setDraft] = useState(initialDraft);
   const [items, setItems] = useState<InvoiceItemDraft[]>([createItem()]);
@@ -298,6 +322,7 @@ export function FinanceDashboard({
   const invoicesQuery = useQuery({
     queryKey: ['operations', 'invoices'],
     queryFn: () => fetchResource<Invoice>('invoices'),
+    enabled: !isCreateView,
     retry: false,
   });
   const settingsQuery = useQuery({
@@ -373,6 +398,30 @@ export function FinanceDashboard({
   });
 
   const clients = clientsQuery.data ?? [];
+  const scopedClient = clientId
+    ? clients.find((client) => client.id === clientId)
+    : undefined;
+
+  useEffect(() => {
+    if (!clientId || clientApplied.current || !clientsQuery.data) return;
+    clientApplied.current = true;
+    const client = clientsQuery.data.find((value) => value.id === clientId);
+    if (!client) {
+      setMessage('This client record could not be found.');
+      setMessageIsError(true);
+      return;
+    }
+    setDraft((current) => ({
+      ...current,
+      clientId: client.id,
+      clientName: client.name,
+      clientDetails: client.billing_details ?? '',
+      clientEmail: client.email ?? '',
+      clientPhone: client.phone ?? '',
+      clientTaxId: client.tax_id ?? '',
+    }));
+  }, [clientId, clientsQuery.data]);
+
   const invoices = useMemo(
     () => invoicesQuery.data ?? [],
     [invoicesQuery.data]
@@ -520,7 +569,9 @@ export function FinanceDashboard({
         link.download = `${draft.invoiceNumber || 'invoice'}.pdf`;
         link.click();
         window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
-        setMessage('Invoice issued, archived in the client record, and downloaded.');
+        setMessage(
+          'Invoice issued, archived in the client record, and downloaded.'
+        );
         setMessageIsError(false);
         setDraft((current) => ({
           ...draftWithSettings(settingsQuery.data ?? fallbackInvoiceSettings),
@@ -533,15 +584,23 @@ export function FinanceDashboard({
         }));
         setItems([createItem()]);
         await Promise.all([
-          queryClient.invalidateQueries({ queryKey: ['operations', 'invoices'] }),
-          queryClient.invalidateQueries({ queryKey: ['operations', 'clients'] }),
+          queryClient.invalidateQueries({
+            queryKey: ['operations', 'invoices'],
+          }),
+          queryClient.invalidateQueries({
+            queryKey: ['operations', 'clients'],
+          }),
           queryClient.invalidateQueries({ queryKey: ['client-manager'] }),
-          queryClient.invalidateQueries({ queryKey: ['operations-header-summary'] }),
+          queryClient.invalidateQueries({
+            queryKey: ['operations-header-summary'],
+          }),
         ]);
       }
     } catch (error) {
       const errorMessage =
-        error instanceof Error ? error.message : 'Unable to create invoice PDF.';
+        error instanceof Error
+          ? error.message
+          : 'Unable to create invoice PDF.';
       if (previewWindow && !previewWindow.closed) {
         showPreviewWindowState(
           previewWindow,
@@ -559,9 +618,13 @@ export function FinanceDashboard({
 
   return (
     <div className="space-y-5">
-      <FinanceBreadcrumb view={view} />
+      <FinanceBreadcrumb
+        view={view}
+        clientId={clientId}
+        clientName={scopedClient?.name || draft.clientName}
+      />
       <PageHeader
-        title={isCreateView ? 'Create invoice' : 'Finance and invoices'}
+        title={isCreateView ? 'Add invoice' : 'Invoices'}
         description={
           isCreateView
             ? 'Prepare a branded PDF invoice and archive it against the client record.'
@@ -571,13 +634,21 @@ export function FinanceDashboard({
           <div className="flex flex-wrap items-center gap-2">
             {isCreateView ? (
               <Button variant="outline" size="sm" asChild>
-                <Link href="/finance">Back to finance</Link>
+                <Link
+                  href={
+                    clientId
+                      ? `/clients?clientId=${encodeURIComponent(clientId)}`
+                      : '/clients'
+                  }
+                >
+                  Back to client
+                </Link>
               </Button>
             ) : (
               <Button size="sm" asChild>
-                <Link href="/finance/invoices/new">
+                <Link href="/clients">
                   <FilePlus2 className="mr-1.5 h-4 w-4" />
-                  Create invoice
+                  Select a client
                 </Link>
               </Button>
             )}
@@ -591,10 +662,10 @@ export function FinanceDashboard({
         }
       />
 
-      {invoicesQuery.isError || clientsQuery.isError ? (
+      {clientsQuery.isError || (!isCreateView && invoicesQuery.isError) ? (
         <EmptyState
           error
-          title="Finance records could not be loaded"
+          title="Invoice records could not be loaded"
           description={
             (invoicesQuery.error as Error | null)?.message ??
             (clientsQuery.error as Error | null)?.message ??
@@ -603,548 +674,578 @@ export function FinanceDashboard({
         />
       ) : (
         <>
-          <SectionPanel
-            title="Create PDF invoice"
-            description="Preview without saving, or issue to create the invoice, client document, and downloadable PDF."
-            actions={
-              <StatusPill tone={draft.language === 'pt' ? 'success' : 'primary'}>
-                {draft.language === 'pt' ? 'Português' : 'English'}
-              </StatusPill>
-            }
-            bodyClassName="p-0"
-          >
-            <div className="space-y-0 divide-y">
-              <div className="grid gap-4 p-4 lg:grid-cols-2">
-                <label className="block text-xs font-medium">
-                  Saved client
-                  <select
-                    value={draft.clientId}
-                    onChange={(event) => chooseClient(event.target.value)}
-                    className={`${selectClassName} mt-1`}
-                  >
-                    <option value="">New client</option>
-                    {clients.map((client) => (
-                      <option key={client.id} value={client.id}>
-                        {client.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="grid grid-cols-2 gap-3">
+          {isCreateView && clientId && clientsQuery.data && !scopedClient ? (
+            <EmptyState
+              error
+              title="Client record not found"
+              description="Return to Clients and select a client before adding an invoice."
+            />
+          ) : isCreateView ? (
+            <SectionPanel
+              title="Create PDF invoice"
+              description="Preview without saving, or issue to create the invoice, client document, and downloadable PDF."
+              actions={
+                <StatusPill
+                  tone={draft.language === 'pt' ? 'success' : 'primary'}
+                >
+                  {draft.language === 'pt' ? 'Português' : 'English'}
+                </StatusPill>
+              }
+              bodyClassName="p-0"
+            >
+              <div className="space-y-0 divide-y">
+                <div className="grid gap-4 p-4 lg:grid-cols-2">
                   <label className="block text-xs font-medium">
-                    Language
+                    Saved client
                     <select
-                      value={draft.language}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          language: event.target.value as 'en' | 'pt',
-                        }))
-                      }
+                      value={draft.clientId}
+                      onChange={(event) => chooseClient(event.target.value)}
+                      disabled={Boolean(clientId)}
                       className={`${selectClassName} mt-1`}
                     >
-                      <option value="en">English</option>
-                      <option value="pt">Português</option>
+                      <option value="">
+                        {clientId ? 'Loading client…' : 'New client'}
+                      </option>
+                      {clients.map((client) => (
+                        <option key={client.id} value={client.id}>
+                          {client.name}
+                        </option>
+                      ))}
                     </select>
                   </label>
-                  <label className="block text-xs font-medium">
-                    Currency
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="block text-xs font-medium">
+                      Language
+                      <select
+                        value={draft.language}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            language: event.target.value as 'en' | 'pt',
+                          }))
+                        }
+                        className={`${selectClassName} mt-1`}
+                      >
+                        <option value="en">English</option>
+                        <option value="pt">Português</option>
+                      </select>
+                    </label>
+                    <label className="block text-xs font-medium">
+                      Currency
+                      <Input
+                        id="invoice-currency"
+                        value={draft.currency}
+                        maxLength={3}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            currency: event.target.value.toUpperCase(),
+                          }))
+                        }
+                        className="mt-1 uppercase"
+                      />
+                    </label>
+                  </div>
+                  <label className="block text-xs font-medium lg:col-span-2">
+                    Client name
                     <Input
-                      id="invoice-currency"
-                      value={draft.currency}
-                      maxLength={3}
+                      id="invoice-client-name"
+                      value={draft.clientName}
                       onChange={(event) =>
                         setDraft((current) => ({
                           ...current,
-                          currency: event.target.value.toUpperCase(),
+                          clientName: event.target.value,
                         }))
                       }
-                      className="mt-1 uppercase"
+                      placeholder="Client or institution name"
+                      className="mt-1"
                     />
                   </label>
-                </div>
-                <label className="block text-xs font-medium lg:col-span-2">
-                  Client name
-                  <Input
-                    id="invoice-client-name"
-                    value={draft.clientName}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        clientName: event.target.value,
-                      }))
-                    }
-                    placeholder="Client or institution name"
-                    className="mt-1"
-                  />
-                </label>
-                <label className="block text-xs font-medium lg:col-span-2">
-                  Client details
-                  <textarea
-                    value={draft.clientDetails}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        clientDetails: event.target.value,
-                      }))
-                    }
-                    placeholder="Address, city, country, and any billing identifiers"
-                    className={`${textareaClassName} mt-1 min-h-20`}
-                  />
-                </label>
-                <label className="block text-xs font-medium">
-                  Email
-                  <Input
-                    type="email"
-                    value={draft.clientEmail}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        clientEmail: event.target.value,
-                      }))
-                    }
-                    className="mt-1"
-                  />
-                </label>
-                <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-3">
-                  <label className="block text-xs font-medium">
-                    Phone
-                    <Input
-                      value={draft.clientPhone}
+                  <label className="block text-xs font-medium lg:col-span-2">
+                    Client details
+                    <textarea
+                      value={draft.clientDetails}
                       onChange={(event) =>
                         setDraft((current) => ({
                           ...current,
-                          clientPhone: event.target.value,
+                          clientDetails: event.target.value,
+                        }))
+                      }
+                      placeholder="Address, city, country, and any billing identifiers"
+                      className={`${textareaClassName} mt-1 min-h-20`}
+                    />
+                  </label>
+                  <label className="block text-xs font-medium">
+                    Email
+                    <Input
+                      type="email"
+                      value={draft.clientEmail}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          clientEmail: event.target.value,
                         }))
                       }
                       className="mt-1"
                     />
                   </label>
-                  <label className="block text-xs font-medium">
-                    Tax ID
-                    <Input
-                      value={draft.clientTaxId}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          clientTaxId: event.target.value,
-                        }))
-                      }
-                      className="mt-1"
-                    />
-                  </label>
-                  <Button
-                    variant="outline"
-                    className="mt-5"
-                    onClick={() => saveClientMutation.mutate()}
-                    disabled={
-                      !draft.clientName.trim() || saveClientMutation.isPending
-                    }
-                  >
-                    <Save className="mr-1.5 h-4 w-4" />
-                    Save client
-                  </Button>
-                </div>
-              </div>
-
-              <div className="grid gap-4 p-4 md:grid-cols-2 xl:grid-cols-4">
-                <label className="block text-xs font-medium">
-                  Invoice number (optional)
-                  <Input
-                    value={draft.invoiceNumber}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        invoiceNumber: event.target.value,
-                      }))
-                    }
-                    placeholder="Generated automatically"
-                    className="mt-1"
-                  />
-                </label>
-                <label className="block text-xs font-medium">
-                  Emission date
-                  <Input
-                    id="invoice-issue-date"
-                    type="date"
-                    value={draft.issueDate}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        issueDate: event.target.value,
-                      }))
-                    }
-                    className="mt-1"
-                  />
-                </label>
-                <label className="block text-xs font-medium">
-                  Expiration date
-                  <Input
-                    id="invoice-due-date"
-                    type="date"
-                    value={draft.dueDate}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        dueDate: event.target.value,
-                      }))
-                    }
-                    className="mt-1"
-                  />
-                </label>
-                <label className="block text-xs font-medium">
-                  Tax
-                  <div className="mt-1 flex items-center gap-2">
-                    <Input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={draft.taxPercent}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          taxPercent: event.target.value,
-                        }))
-                      }
-                    />
-                    <span className="text-sm text-muted-foreground">%</span>
-                  </div>
-                </label>
-              </div>
-
-              <div className="space-y-3 p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h3 className="font-display text-base font-semibold">Items</h3>
-                    <p className="text-xs text-muted-foreground">
-                      Quantity and unit price calculate the invoice total.
-                    </p>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setItems((current) => [...current, createItem()])}
-                  >
-                    <Plus className="mr-1.5 h-4 w-4" />
-                    Add item
-                  </Button>
-                </div>
-                {items.map((item, index) => (
-                  <div
-                    key={item.id}
-                    className="grid gap-3 border-t pt-3 md:grid-cols-[minmax(0,1fr)_120px_160px_auto]"
-                  >
+                  <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-3">
                     <label className="block text-xs font-medium">
-                      Description
+                      Phone
                       <Input
-                        id={`invoice-item-${index}-description`}
-                        value={item.description}
+                        value={draft.clientPhone}
                         onChange={(event) =>
-                          updateItem(item.id, 'description', event.target.value)
-                        }
-                        placeholder={
-                          index === 0
-                            ? 'Stable isotope analyses or technical service'
-                            : 'Additional service'
+                          setDraft((current) => ({
+                            ...current,
+                            clientPhone: event.target.value,
+                          }))
                         }
                         className="mt-1"
                       />
                     </label>
                     <label className="block text-xs font-medium">
-                      Quantity
+                      Tax ID
                       <Input
-                        type="number"
-                        min="0.001"
-                        step="0.001"
-                        value={item.quantity}
+                        value={draft.clientTaxId}
                         onChange={(event) =>
-                          updateItem(item.id, 'quantity', event.target.value)
-                        }
-                        className="mt-1"
-                      />
-                    </label>
-                    <label className="block text-xs font-medium">
-                      Unit price
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={item.unitPrice}
-                        onChange={(event) =>
-                          updateItem(item.id, 'unitPrice', event.target.value)
+                          setDraft((current) => ({
+                            ...current,
+                            clientTaxId: event.target.value,
+                          }))
                         }
                         className="mt-1"
                       />
                     </label>
                     <Button
-                      variant="ghost"
-                      size="sm"
+                      variant="outline"
                       className="mt-5"
-                      onClick={() =>
-                        setItems((current) =>
-                          current.length === 1
-                            ? [createItem()]
-                            : current.filter((value) => value.id !== item.id)
-                        )
+                      onClick={() => saveClientMutation.mutate()}
+                      disabled={
+                        !draft.clientName.trim() || saveClientMutation.isPending
                       }
-                      aria-label={`Remove item ${index + 1}`}
                     >
-                      <Trash2 className="mr-1 h-4 w-4" />
-                      Remove
+                      <Save className="mr-1.5 h-4 w-4" />
+                      Save client
                     </Button>
                   </div>
-                ))}
-              </div>
+                </div>
 
-              <div className="grid gap-4 p-4 lg:grid-cols-2">
-                <label className="block text-xs font-medium lg:col-span-2">
-                  Service description
-                  <textarea
-                    value={draft.serviceDescription}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        serviceDescription: event.target.value,
-                      }))
-                    }
-                    placeholder="Describe the analytical service, deliverables, or training scope."
-                    className={`${textareaClassName} mt-1 min-h-24`}
-                  />
-                </label>
-                <label className="block text-xs font-medium">
-                  Issuer details
-                  <textarea
-                    id="invoice-issuer-details"
-                    value={draft.issuerDetails}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        issuerDetails: event.target.value,
-                      }))
-                    }
-                    className={`${textareaClassName} mt-1 min-h-28`}
-                  />
-                </label>
-                <label className="block text-xs font-medium">
-                  Additional custom info
-                  <textarea
-                    value={draft.additionalInfo}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        additionalInfo: event.target.value,
-                      }))
-                    }
-                    placeholder="Terms, references, or notes"
-                    className={`${textareaClassName} mt-1 min-h-28`}
-                  />
-                </label>
-                <label className="block text-xs font-medium lg:col-span-2">
-                  Bank details
-                  <select
-                    value={draft.paymentInstructions}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        paymentInstructions: event.target.value as
-                          | 'national'
-                          | 'international'
-                          | 'both',
-                      }))
-                    }
-                    className={`${selectClassName} mt-1`}
-                  >
-                    <option value="national">National</option>
-                    <option value="international">International</option>
-                    <option value="both">National and international</option>
-                  </select>
-                </label>
-                {draft.paymentInstructions !== 'international' ? (
+                <div className="grid gap-4 p-4 md:grid-cols-2 xl:grid-cols-4">
                   <label className="block text-xs font-medium">
-                    National payment instructions
-                    <textarea
-                      value={draft.nationalPaymentDetails}
+                    Invoice number (optional)
+                    <Input
+                      value={draft.invoiceNumber}
                       onChange={(event) =>
                         setDraft((current) => ({
                           ...current,
-                          nationalPaymentDetails: event.target.value,
+                          invoiceNumber: event.target.value,
                         }))
                       }
-                      placeholder="Bank, branch, account, PIX, beneficiary, and reference"
-                      className={`${textareaClassName} mt-1 min-h-28`}
+                      placeholder="Generated automatically"
+                      className="mt-1"
                     />
                   </label>
-                ) : null}
-                {draft.paymentInstructions !== 'national' ? (
                   <label className="block text-xs font-medium">
-                    International payment instructions
-                    <textarea
-                      value={draft.internationalPaymentDetails}
+                    Emission date
+                    <Input
+                      id="invoice-issue-date"
+                      type="date"
+                      value={draft.issueDate}
                       onChange={(event) =>
                         setDraft((current) => ({
                           ...current,
-                          internationalPaymentDetails: event.target.value,
+                          issueDate: event.target.value,
                         }))
                       }
-                      placeholder="Account holder, SWIFT/BIC, account, bank address, and reference"
+                      className="mt-1"
+                    />
+                  </label>
+                  <label className="block text-xs font-medium">
+                    Expiration date
+                    <Input
+                      id="invoice-due-date"
+                      type="date"
+                      value={draft.dueDate}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          dueDate: event.target.value,
+                        }))
+                      }
+                      className="mt-1"
+                    />
+                  </label>
+                  <label className="block text-xs font-medium">
+                    Tax
+                    <div className="mt-1 flex items-center gap-2">
+                      <Input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={draft.taxPercent}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            taxPercent: event.target.value,
+                          }))
+                        }
+                      />
+                      <span className="text-sm text-muted-foreground">%</span>
+                    </div>
+                  </label>
+                </div>
+
+                <div className="space-y-3 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="font-display text-base font-semibold">
+                        Items
+                      </h3>
+                      <p className="text-xs text-muted-foreground">
+                        Quantity and unit price calculate the invoice total.
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        setItems((current) => [...current, createItem()])
+                      }
+                    >
+                      <Plus className="mr-1.5 h-4 w-4" />
+                      Add item
+                    </Button>
+                  </div>
+                  {items.map((item, index) => (
+                    <div
+                      key={item.id}
+                      className="grid gap-3 border-t pt-3 md:grid-cols-[minmax(0,1fr)_120px_160px_auto]"
+                    >
+                      <label className="block text-xs font-medium">
+                        Description
+                        <Input
+                          id={`invoice-item-${index}-description`}
+                          value={item.description}
+                          onChange={(event) =>
+                            updateItem(
+                              item.id,
+                              'description',
+                              event.target.value
+                            )
+                          }
+                          placeholder={
+                            index === 0
+                              ? 'Stable isotope analyses or technical service'
+                              : 'Additional service'
+                          }
+                          className="mt-1"
+                        />
+                      </label>
+                      <label className="block text-xs font-medium">
+                        Quantity
+                        <Input
+                          type="number"
+                          min="0.001"
+                          step="0.001"
+                          value={item.quantity}
+                          onChange={(event) =>
+                            updateItem(item.id, 'quantity', event.target.value)
+                          }
+                          className="mt-1"
+                        />
+                      </label>
+                      <label className="block text-xs font-medium">
+                        Unit price
+                        <Input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={item.unitPrice}
+                          onChange={(event) =>
+                            updateItem(item.id, 'unitPrice', event.target.value)
+                          }
+                          className="mt-1"
+                        />
+                      </label>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="mt-5"
+                        onClick={() =>
+                          setItems((current) =>
+                            current.length === 1
+                              ? [createItem()]
+                              : current.filter((value) => value.id !== item.id)
+                          )
+                        }
+                        aria-label={`Remove item ${index + 1}`}
+                      >
+                        <Trash2 className="mr-1 h-4 w-4" />
+                        Remove
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid gap-4 p-4 lg:grid-cols-2">
+                  <label className="block text-xs font-medium lg:col-span-2">
+                    Service description
+                    <textarea
+                      value={draft.serviceDescription}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          serviceDescription: event.target.value,
+                        }))
+                      }
+                      placeholder="Describe the analytical service, deliverables, or training scope."
+                      className={`${textareaClassName} mt-1 min-h-24`}
+                    />
+                  </label>
+                  <label className="block text-xs font-medium">
+                    Issuer details
+                    <textarea
+                      id="invoice-issuer-details"
+                      value={draft.issuerDetails}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          issuerDetails: event.target.value,
+                        }))
+                      }
                       className={`${textareaClassName} mt-1 min-h-28`}
                     />
                   </label>
-                ) : null}
-              </div>
-
-              <div className="flex flex-col gap-4 bg-slate-50 p-4 dark:bg-slate-900/50 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                  <p className="text-xs text-muted-foreground">
-                    Estimated amount due
-                  </p>
-                  <p className="mt-1 font-display text-2xl font-semibold tracking-[-0.02em] tabular-nums">
-                    {formatMoney(amountDue, draft.currency || 'BRL')}
-                  </p>
-                  <p
-                    className={`mt-1 min-h-4 text-[11px] ${
-                      messageIsError
-                        ? 'font-medium text-destructive'
-                        : 'text-muted-foreground'
-                    }`}
-                    role={messageIsError ? 'alert' : 'status'}
-                    aria-live="polite"
-                  >
-                    {message}
-                  </p>
+                  <label className="block text-xs font-medium">
+                    Additional custom info
+                    <textarea
+                      value={draft.additionalInfo}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          additionalInfo: event.target.value,
+                        }))
+                      }
+                      placeholder="Terms, references, or notes"
+                      className={`${textareaClassName} mt-1 min-h-28`}
+                    />
+                  </label>
+                  <label className="block text-xs font-medium lg:col-span-2">
+                    Bank details
+                    <select
+                      value={draft.paymentInstructions}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          paymentInstructions: event.target.value as
+                            | 'national'
+                            | 'international'
+                            | 'both',
+                        }))
+                      }
+                      className={`${selectClassName} mt-1`}
+                    >
+                      <option value="national">National</option>
+                      <option value="international">International</option>
+                      <option value="both">National and international</option>
+                    </select>
+                  </label>
+                  {draft.paymentInstructions !== 'international' ? (
+                    <label className="block text-xs font-medium">
+                      National payment instructions
+                      <textarea
+                        value={draft.nationalPaymentDetails}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            nationalPaymentDetails: event.target.value,
+                          }))
+                        }
+                        placeholder="Bank, branch, account, PIX, beneficiary, and reference"
+                        className={`${textareaClassName} mt-1 min-h-28`}
+                      />
+                    </label>
+                  ) : null}
+                  {draft.paymentInstructions !== 'national' ? (
+                    <label className="block text-xs font-medium">
+                      International payment instructions
+                      <textarea
+                        value={draft.internationalPaymentDetails}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            internationalPaymentDetails: event.target.value,
+                          }))
+                        }
+                        placeholder="Account holder, SWIFT/BIC, account, bank address, and reference"
+                        className={`${textareaClassName} mt-1 min-h-28`}
+                      />
+                    </label>
+                  ) : null}
                 </div>
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    onClick={() => createPdf('preview')}
-                    disabled={pdfBusy !== null}
-                  >
-                    {pdfBusy === 'preview' ? 'Creating preview…' : 'Preview'}
-                  </Button>
-                  <Button
-                    onClick={() => createPdf('issue')}
-                    disabled={pdfBusy !== null}
-                  >
-                    <FilePlus2 className="mr-1.5 h-4 w-4" />
-                    {pdfBusy === 'issue'
-                      ? 'Issuing invoice…'
-                      : 'Create PDF invoice'}
-                  </Button>
+
+                <div className="flex flex-col gap-4 bg-slate-50 p-4 dark:bg-slate-900/50 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <p className="text-xs text-muted-foreground">
+                      Estimated amount due
+                    </p>
+                    <p className="mt-1 font-display text-2xl font-semibold tracking-[-0.02em] tabular-nums">
+                      {formatMoney(amountDue, draft.currency || 'BRL')}
+                    </p>
+                    <p
+                      className={`mt-1 min-h-4 text-[11px] ${
+                        messageIsError
+                          ? 'font-medium text-destructive'
+                          : 'text-muted-foreground'
+                      }`}
+                      role={messageIsError ? 'alert' : 'status'}
+                      aria-live="polite"
+                    >
+                      {message}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => createPdf('preview')}
+                      disabled={pdfBusy !== null}
+                    >
+                      {pdfBusy === 'preview' ? 'Creating preview…' : 'Preview'}
+                    </Button>
+                    <Button
+                      onClick={() => createPdf('issue')}
+                      disabled={pdfBusy !== null}
+                    >
+                      <FilePlus2 className="mr-1.5 h-4 w-4" />
+                      {pdfBusy === 'issue'
+                        ? 'Issuing invoice…'
+                        : 'Create PDF invoice'}
+                    </Button>
+                  </div>
                 </div>
               </div>
-            </div>
-          </SectionPanel>
+            </SectionPanel>
+          ) : null}
 
-          <Toolbar>
-            <div className="relative max-w-xl">
-              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search invoice, client, or status"
-                className="pl-9"
-              />
-            </div>
-          </Toolbar>
+          {!isCreateView ? (
+            <>
+              <Toolbar>
+                <div className="relative max-w-xl">
+                  <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    placeholder="Search invoice, client, or status"
+                    className="pl-9"
+                  />
+                </div>
+              </Toolbar>
 
-          <SectionPanel
-            title="Invoice ledger"
-            description={`${filteredInvoices.length} invoices match the current search.`}
-            bodyClassName="p-0"
-          >
-            {filteredInvoices.length ? (
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Invoice</TableHead>
-                      <TableHead>Client</TableHead>
-                      <TableHead>Issued</TableHead>
-                      <TableHead>Due</TableHead>
-                      <TableHead className="text-right">Total</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredInvoices.map((invoice) => (
-                      <TableRow key={invoice.id}>
-                        <TableCell className="font-mono font-medium">
-                          {invoice.invoice_number}
-                        </TableCell>
-                        <TableCell>
-                          {invoice.client?.name ?? 'Unknown client'}
-                        </TableCell>
-                        <TableCell className="font-mono tabular-nums">
-                          {invoice.issue_date}
-                        </TableCell>
-                        <TableCell className="font-mono tabular-nums">
-                          {invoice.due_date ?? '—'}
-                        </TableCell>
-                        <TableCell className="text-right font-mono tabular-nums">
-                          {formatMoney(invoice.total_amount, invoice.currency)}
-                        </TableCell>
-                        <TableCell>
-                          <StatusPill tone={invoiceTone(invoice.status)}>
-                            {invoice.status}
-                          </StatusPill>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex flex-wrap gap-1.5">
-                            {invoice.pdf_document_id ? (
-                              <Button size="sm" variant="outline" asChild>
-                                <a
-                                  href={`/api/client-manager/documents/${invoice.pdf_document_id}`}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  <Download className="mr-1 h-3.5 w-3.5" />
-                                  PDF
-                                </a>
-                              </Button>
-                            ) : null}
-                            {invoice.status === 'draft' ? (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() =>
-                                  statusMutation.mutate({
-                                    id: invoice.id,
-                                    status: 'sent',
-                                  })
-                                }
-                                disabled={statusMutation.isPending}
-                              >
-                                Mark sent
-                              </Button>
-                            ) : ['sent', 'overdue'].includes(invoice.status) ? (
-                              <Button
-                                size="sm"
-                                onClick={() =>
-                                  statusMutation.mutate({
-                                    id: invoice.id,
-                                    status: 'paid',
-                                  })
-                                }
-                                disabled={statusMutation.isPending}
-                              >
-                                Mark paid
-                              </Button>
-                            ) : null}
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            ) : (
-              <EmptyState
-                title="No invoices match"
-                description="Change the search or issue the first PDF invoice."
-              />
-            )}
-          </SectionPanel>
+              <SectionPanel
+                title="Invoice ledger"
+                description={`${filteredInvoices.length} invoices match the current search.`}
+                bodyClassName="p-0"
+              >
+                {filteredInvoices.length ? (
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Invoice</TableHead>
+                          <TableHead>Client</TableHead>
+                          <TableHead>Issued</TableHead>
+                          <TableHead>Due</TableHead>
+                          <TableHead className="text-right">Total</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead>Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {filteredInvoices.map((invoice) => (
+                          <TableRow key={invoice.id}>
+                            <TableCell className="font-mono font-medium">
+                              {invoice.invoice_number}
+                            </TableCell>
+                            <TableCell>
+                              {invoice.client?.name ?? 'Unknown client'}
+                            </TableCell>
+                            <TableCell className="font-mono tabular-nums">
+                              {invoice.issue_date}
+                            </TableCell>
+                            <TableCell className="font-mono tabular-nums">
+                              {invoice.due_date ?? '—'}
+                            </TableCell>
+                            <TableCell className="text-right font-mono tabular-nums">
+                              {formatMoney(
+                                invoice.total_amount,
+                                invoice.currency
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <StatusPill tone={invoiceTone(invoice.status)}>
+                                {invoice.status}
+                              </StatusPill>
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex flex-wrap gap-1.5">
+                                {invoice.pdf_document_id ? (
+                                  <Button size="sm" variant="outline" asChild>
+                                    <a
+                                      href={`/api/client-manager/documents/${invoice.pdf_document_id}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                    >
+                                      <Download className="mr-1 h-3.5 w-3.5" />
+                                      PDF
+                                    </a>
+                                  </Button>
+                                ) : null}
+                                {invoice.status === 'draft' ? (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() =>
+                                      statusMutation.mutate({
+                                        id: invoice.id,
+                                        status: 'sent',
+                                      })
+                                    }
+                                    disabled={statusMutation.isPending}
+                                  >
+                                    Mark sent
+                                  </Button>
+                                ) : ['sent', 'overdue'].includes(
+                                    invoice.status
+                                  ) ? (
+                                  <Button
+                                    size="sm"
+                                    onClick={() =>
+                                      statusMutation.mutate({
+                                        id: invoice.id,
+                                        status: 'paid',
+                                      })
+                                    }
+                                    disabled={statusMutation.isPending}
+                                  >
+                                    Mark paid
+                                  </Button>
+                                ) : null}
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                ) : (
+                  <EmptyState
+                    title="No invoices match"
+                    description="Change the search or issue the first PDF invoice."
+                  />
+                )}
+              </SectionPanel>
+            </>
+          ) : null}
         </>
       )}
     </div>

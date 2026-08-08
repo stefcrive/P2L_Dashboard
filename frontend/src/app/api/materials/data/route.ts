@@ -170,6 +170,7 @@ function buildResponse(
   allMaterials: MaterialInventoryRow[],
   purchaseLists: MaterialPurchaseListWithItems[],
   providers: Array<{ id: string; name: string }>,
+  equipmentOptions: MaterialsCatalogDataResponse['equipmentOptions'],
   filters: QueryFilters
 ): MaterialsCatalogDataResponse {
   const materials = applyFilters(allMaterials, filters);
@@ -178,7 +179,10 @@ function buildResponse(
     allMaterials.some((material) => material.material_type === type)
   );
   const availableEquipment = Array.from(
-    new Set(allMaterials.map((material) => material.equipment ?? 'General Lab'))
+    new Set([
+      ...equipmentOptions.map((equipment) => equipment.name),
+      ...allMaterials.map((material) => material.equipment ?? 'General Lab'),
+    ])
   ).sort((a, b) => a.localeCompare(b));
 
   const totalConsumables = materials.filter(
@@ -201,6 +205,7 @@ function buildResponse(
     warnings,
     availableTypes,
     availableEquipment,
+    equipmentOptions,
     materials,
     purchaseLists,
     providers,
@@ -277,7 +282,7 @@ async function getFilesystemFallback(
   const mantainanceRootPath = await resolveMantainanceRootPath();
   const exists = await mantainancePathExists(mantainanceRootPath);
   if (!exists) {
-    return buildResponse('filesystem', warnings, [], [], [], filters);
+    return buildResponse('filesystem', warnings, [], [], [], [], filters);
   }
 
   const extracted = await extractMantainanceMaterials(mantainanceRootPath);
@@ -319,6 +324,7 @@ async function getFilesystemFallback(
     'filesystem',
     [...warnings, ...extracted.warnings],
     materials,
+    [],
     [],
     [],
     filters
@@ -393,6 +399,18 @@ export async function GET(request: Request) {
       );
     }
 
+    const { data: equipmentData, error: equipmentError } = await supabase
+      .from('equipment_assets')
+      .select('id, asset_code, name, status')
+      .neq('status', 'retired')
+      .order('name', { ascending: true });
+    if (equipmentError) {
+      return NextResponse.json(
+        { error: `Unable to load equipment portfolio: ${equipmentError.message}` },
+        { status: 500 }
+      );
+    }
+
     if (purchaseListsError) {
       if (!hasMissingTableError(purchaseListsError)) {
         return NextResponse.json(
@@ -441,6 +459,17 @@ export async function GET(request: Request) {
         (materialsData ?? []) as MaterialInventoryRow[],
         buildPurchaseLists(purchaseListRows, purchaseListItemRows),
         (providersData ?? []) as Array<{ id: string; name: string }>,
+        ((equipmentData ?? []) as Array<{
+          id: string;
+          asset_code: string;
+          name: string;
+          status: 'active' | 'service_due' | 'out_of_service' | 'retired';
+        }>).map((equipment) => ({
+          id: equipment.id,
+          assetCode: equipment.asset_code,
+          name: equipment.name,
+          status: equipment.status,
+        })),
         filters
       )
     );

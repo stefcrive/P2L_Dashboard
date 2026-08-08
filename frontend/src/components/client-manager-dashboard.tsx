@@ -1,18 +1,23 @@
 'use client';
 
+import Link from 'next/link';
 import {
   type Dispatch,
   type SetStateAction,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowDownAZ,
+  BarChart3,
   Clock3,
   ExternalLink,
+  FilePlus2,
   Pencil,
+  Plus,
   Search,
   Trash2,
   Upload,
@@ -38,6 +43,7 @@ import {
 } from '@/components/ui/table';
 import {
   CREDIT_EVENT_EQUIPMENT_OPTIONS,
+  CREDIT_EVENT_TYPES,
   type ClientManagerDataResponse,
   type ClientWithDocuments,
   type CreditEventType,
@@ -71,6 +77,15 @@ interface CreditEventMutationPayload {
   unitCost: number | null;
   amount: number | null;
   comment: string | null;
+}
+
+interface ClientRecordDraft {
+  id: string;
+  name: string;
+  billingDetails: string;
+  email: string;
+  phone: string;
+  taxId: string;
 }
 
 const categoryLabel: Record<DocumentCategory, string> = {
@@ -119,11 +134,23 @@ function formatCurrency(value: number | null): string {
   }).format(value);
 }
 
+function formatSignedCurrency(value: number | null): string {
+  if (value === null || value === undefined) return '-';
+  return `${value > 0 ? '+' : ''}${formatCurrency(value)}`;
+}
+
 function parseNullableNumber(value: string): number | null {
   const normalized = value.trim();
   if (!normalized) return null;
   const parsed = Number.parseFloat(normalized.replace(',', '.'));
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeCreditEventType(value: string): CreditEventType {
+  return (
+    CREDIT_EVENT_TYPES.find((eventType) => eventType === value.trim()) ??
+    'adjustment'
+  );
 }
 
 function createCreditEventDraft(): CreditEventDraft {
@@ -135,6 +162,22 @@ function createCreditEventDraft(): CreditEventDraft {
     unitCost: '',
     amount: '',
     comment: '',
+  };
+}
+
+function createClientRecordDraft(
+  client?: Pick<
+    ClientWithDocuments,
+    'id' | 'name' | 'billing_details' | 'email' | 'phone' | 'tax_id'
+  >
+): ClientRecordDraft {
+  return {
+    id: client?.id ?? '',
+    name: client?.name ?? '',
+    billingDetails: client?.billing_details ?? '',
+    email: client?.email ?? '',
+    phone: client?.phone ?? '',
+    taxId: client?.tax_id ?? '',
   };
 }
 
@@ -225,7 +268,7 @@ function CreditEventFormFields({
       </label>
       <label className="space-y-1">
         <span className="text-[11px] font-medium text-muted-foreground">
-          Amount override
+          Amount override (sign is automatic)
         </span>
         <Input
           id={`${idPrefix}-amount`}
@@ -333,6 +376,32 @@ async function removeCreditEvent(
   return response.json();
 }
 
+async function saveClientRecord(
+  draft: ClientRecordDraft
+): Promise<{ message: string; client: { id: string } }> {
+  const response = await fetch('/api/invoices/clients', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: draft.id || undefined,
+      name: draft.name,
+      billingDetails: draft.billingDetails,
+      email: draft.email,
+      phone: draft.phone,
+      taxId: draft.taxId,
+    }),
+  });
+  const body = (await response.json().catch(() => null)) as {
+    error?: string;
+    message?: string;
+    client?: { id?: string };
+  } | null;
+  if (!response.ok || !body?.client?.id) {
+    throw new Error(body?.error ?? 'Unable to save the client record.');
+  }
+  return { message: body.message ?? 'Client record saved.', client: { id: body.client.id } };
+}
+
 async function uploadClientDocument(payload: {
   clientId: string;
   file: File;
@@ -370,15 +439,28 @@ function getClientYearRange(client: ClientWithDocuments): string {
   return 'Unknown';
 }
 
-export function ClientManagerDashboard() {
+export function ClientManagerDashboard({
+  initialClientId = null,
+}: {
+  initialClientId?: string | null;
+}) {
   const queryClient = useQueryClient();
   const [filters, setFilters] = useState<FiltersState>({
     search: '',
     year: 'all',
     category: 'all',
   });
-  const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+  const [selectedClientId, setSelectedClientId] = useState<string | null>(
+    initialClientId
+  );
   const [clientSort, setClientSort] = useState<ClientSort>('name');
+  const clientDialogRef = useRef<HTMLDialogElement>(null);
+  const creditEventDialogRef = useRef<HTMLDialogElement>(null);
+  const [clientDialogOpen, setClientDialogOpen] = useState(false);
+  const [creditEventDialogOpen, setCreditEventDialogOpen] = useState(false);
+  const [clientDraft, setClientDraft] = useState<ClientRecordDraft>(
+    createClientRecordDraft
+  );
   const [creditStatus, setCreditStatus] = useState('');
   const [creditDraft, setCreditDraft] =
     useState<CreditEventDraft>(createCreditEventDraft);
@@ -403,6 +485,7 @@ export function ClientManagerDashboard() {
     onSuccess: async (payload) => {
       setCreditStatus(payload.message);
       setCreditDraft(createCreditEventDraft());
+      setCreditEventDialogOpen(false);
       await queryClient.invalidateQueries({ queryKey: ['client-manager'] });
     },
   });
@@ -443,6 +526,17 @@ export function ClientManagerDashboard() {
     },
   });
 
+  const saveClientMutation = useMutation({
+    mutationFn: saveClientRecord,
+    onError: (error: Error) => setCreditStatus(error.message),
+    onSuccess: async (payload) => {
+      setCreditStatus(payload.message);
+      setSelectedClientId(payload.client.id);
+      setClientDialogOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ['client-manager'] });
+    },
+  });
+
   const data = clientManagerQuery.data;
   const clients = useMemo(() => {
     const sortedClients = [...(data?.clients ?? [])];
@@ -473,6 +567,26 @@ export function ClientManagerDashboard() {
     }
   }, [clients, selectedClientId]);
 
+  useEffect(() => {
+    const dialog = clientDialogRef.current;
+    if (!dialog) return;
+    if (clientDialogOpen && !dialog.open) {
+      dialog.showModal();
+    } else if (!clientDialogOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [clientDialogOpen]);
+
+  useEffect(() => {
+    const dialog = creditEventDialogRef.current;
+    if (!dialog) return;
+    if (creditEventDialogOpen && !dialog.open) {
+      dialog.showModal();
+    } else if (!creditEventDialogOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [creditEventDialogOpen]);
+
   const selectedClient = useMemo(
     () => clients.find((client) => client.id === selectedClientId) ?? null,
     [clients, selectedClientId]
@@ -490,6 +604,29 @@ export function ClientManagerDashboard() {
   const creditEvents =
     selectedClient?.credit_events ?? data?.creditEvents ?? [];
 
+  function openClientRecord(client?: ClientWithDocuments) {
+    if (client) setSelectedClientId(client.id);
+    setClientDraft(createClientRecordDraft(client));
+    setClientDialogOpen(true);
+  }
+
+  function submitClientRecord() {
+    if (!clientDraft.name.trim()) {
+      setCreditStatus('Client name is required.');
+      return;
+    }
+    saveClientMutation.mutate(clientDraft);
+  }
+
+  function openCreditEventDialog() {
+    if (!selectedClient) {
+      setCreditStatus('Select a client first.');
+      return;
+    }
+    setCreditDraft(createCreditEventDraft());
+    setCreditEventDialogOpen(true);
+  }
+
   function submitCreditEvent() {
     if (!selectedClient) {
       setCreditStatus('Select a client first.');
@@ -498,7 +635,7 @@ export function ClientManagerDashboard() {
 
     createEventMutation.mutate({
       clientId: selectedClient.id,
-      eventType: creditDraft.eventType,
+      eventType: normalizeCreditEventType(creditDraft.eventType),
       eventDate: creditDraft.eventDate || null,
       analysesCount: parseNullableNumber(creditDraft.analysesCount),
       equipment: creditDraft.equipment.trim() || null,
@@ -515,7 +652,7 @@ export function ClientManagerDashboard() {
   ) {
     setDraft((previous) =>
       field === 'eventType'
-        ? { ...previous, eventType: value as CreditEventType }
+        ? { ...previous, eventType: normalizeCreditEventType(value) }
         : { ...previous, [field]: value }
     );
   }
@@ -545,7 +682,7 @@ export function ClientManagerDashboard() {
     patchEventMutation.mutate({
       eventId: editingEventId,
       payload: {
-        eventType: editDraft.eventType,
+        eventType: normalizeCreditEventType(editDraft.eventType),
         eventDate: editDraft.eventDate || null,
         analysesCount: parseNullableNumber(editDraft.analysesCount),
         equipment: editDraft.equipment.trim() || null,
@@ -577,6 +714,22 @@ export function ClientManagerDashboard() {
 
   return (
     <div className="space-y-5">
+      <nav
+        aria-label="Breadcrumb"
+        className="flex items-center gap-1.5 text-xs text-muted-foreground"
+      >
+        <Link
+          href="/"
+          className="rounded-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          Overview
+        </Link>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page" className="font-medium text-foreground">
+          Clients
+        </span>
+      </nav>
+
       <PageHeader
         eyebrow="Client work"
         title="Clients"
@@ -674,7 +827,17 @@ export function ClientManagerDashboard() {
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         <Card className="lg:col-span-4">
           <CardHeader className="gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <CardTitle className="text-lg">Clients</CardTitle>
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle className="text-lg">Clients</CardTitle>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => openClientRecord()}
+              >
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                Add client
+              </Button>
+            </div>
             <div
               className="flex items-center gap-1 rounded-md border bg-muted/30 p-0.5"
               aria-label="Sort clients"
@@ -706,28 +869,49 @@ export function ClientManagerDashboard() {
           </CardHeader>
           <CardContent className="max-h-[760px] space-y-2 overflow-y-auto">
             {clients.map((client) => (
-              <button
+              <div
                 key={client.id}
-                type="button"
-                onClick={() => setSelectedClientId(client.id)}
                 className={cn(
-                  'w-full rounded-lg border p-3 text-left transition-colors',
+                  'flex items-start gap-1 rounded-lg border p-1 transition-colors',
                   selectedClientId === client.id
                     ? 'border-primary bg-primary/5'
                     : 'border-border hover:bg-muted/40'
                 )}
               >
-                <div className="flex items-start justify-between gap-2">
-                  <p className="font-medium leading-tight">{client.name}</p>
-                  <Badge variant="outline">{client.total_documents}</Badge>
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  Years: {getClientYearRange(client)}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Balance: {formatCurrency(client.current_credit_balance)}
-                </p>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedClientId(client.id)}
+                  className="min-w-0 flex-1 rounded-md p-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-medium leading-tight">{client.name}</p>
+                    <div className="flex shrink-0 items-center gap-1">
+                      {client.current_credit_balance !== null &&
+                      client.current_credit_balance > 0 ? (
+                        <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+                          Credit available
+                        </Badge>
+                      ) : null}
+                      <Badge variant="outline">{client.total_documents}</Badge>
+                    </div>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Years: {getClientYearRange(client)}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Balance: {formatCurrency(client.current_credit_balance)}
+                  </p>
+                </button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={() => openClientRecord(client)}
+                  aria-label={`Edit ${client.name}`}
+                  title={`Edit ${client.name}`}
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </Button>
+              </div>
             ))}
           </CardContent>
         </Card>
@@ -740,39 +924,23 @@ export function ClientManagerDashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <p className="text-sm text-muted-foreground">
-                Current balance:{' '}
-                <span className="font-medium text-foreground">
-                  {formatCurrency(
-                    selectedClient?.current_credit_balance ?? null
-                  )}
-                </span>
-              </p>
-
-              <div className="rounded-lg border bg-muted/20 p-3">
-                <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-semibold">Add event</p>
-                    <p className="text-xs text-muted-foreground">
-                      Leave Amount override blank to calculate it from analyses * unit cost.
-                    </p>
-                  </div>
-                </div>
-                <CreditEventFormFields
-                  draft={creditDraft}
-                  idPrefix="add-credit-event"
-                  onChange={(field, value) =>
-                    updateCreditDraft(setCreditDraft, field, value)
-                  }
-                />
-                <div className="mt-3 flex justify-end">
-                  <Button
-                    onClick={submitCreditEvent}
-                    disabled={!selectedClient || createEventMutation.isPending}
-                  >
-                    {createEventMutation.isPending ? 'Adding...' : 'Add event'}
-                  </Button>
-                </div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-sm text-muted-foreground">
+                  Current balance:{' '}
+                  <span className="font-medium text-foreground">
+                    {formatCurrency(
+                      selectedClient?.current_credit_balance ?? null
+                    )}
+                  </span>
+                </p>
+                <Button
+                  size="sm"
+                  onClick={openCreditEventDialog}
+                  disabled={!selectedClient}
+                >
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  Add event
+                </Button>
               </div>
 
               {editingEventId && editDraft ? (
@@ -823,7 +991,7 @@ export function ClientManagerDashboard() {
 
               <Table
                 containerClassName="max-h-[320px] border"
-                className="min-w-[1180px]"
+                className="min-w-[1060px]"
               >
                   <TableHeader>
                     <TableRow>
@@ -833,8 +1001,7 @@ export function ClientManagerDashboard() {
                       <TableHead>Equipment</TableHead>
                       <TableHead className="text-right">Unit cost</TableHead>
                       <TableHead className="text-right">Change</TableHead>
-                      <TableHead className="text-right">Before</TableHead>
-                      <TableHead className="text-right">After</TableHead>
+                      <TableHead className="text-right">Balance</TableHead>
                       <TableHead>Comment</TableHead>
                       <TableHead>Source</TableHead>
                       <TableHead className="text-right">Actions</TableHead>
@@ -844,7 +1011,7 @@ export function ClientManagerDashboard() {
                     {creditEvents.length === 0 ? (
                       <TableRow>
                         <TableCell
-                          colSpan={11}
+                          colSpan={10}
                           className="text-center text-muted-foreground"
                         >
                           No credit events.
@@ -875,11 +1042,8 @@ export function ClientManagerDashboard() {
                                 : 'text-emerald-700 dark:text-emerald-300'
                             )}
                           >
-                            {formatCurrency(event.amount)}
+                            {formatSignedCurrency(event.amount)}
                           </span>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {formatCurrency(event.balance_before)}
                         </TableCell>
                         <TableCell className="text-right">
                           {formatCurrency(event.balance_after)}
@@ -952,29 +1116,44 @@ export function ClientManagerDashboard() {
                   quotations, and other administrative records.
                 </p>
               </div>
-              <div
-                className="flex rounded-md border bg-muted/30 p-0.5"
-                role="group"
-                aria-label="Document type"
-              >
-                <Button
-                  size="sm"
-                  variant={documentGroup === 'results' ? 'secondary' : 'ghost'}
-                  className="h-7 px-2 text-[11px]"
-                  onClick={() => setDocumentGroup('results')}
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <div
+                  className="flex rounded-md border bg-muted/30 p-0.5"
+                  role="group"
+                  aria-label="Document type"
                 >
-                  Results {resultDocuments.length}
-                </Button>
-                <Button
-                  size="sm"
-                  variant={
-                    documentGroup === 'administrative' ? 'secondary' : 'ghost'
-                  }
-                  className="h-7 px-2 text-[11px]"
-                  onClick={() => setDocumentGroup('administrative')}
-                >
-                  Administrative {administrativeDocuments.length}
-                </Button>
+                  <Button
+                    size="sm"
+                    variant={documentGroup === 'results' ? 'secondary' : 'ghost'}
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => setDocumentGroup('results')}
+                  >
+                    Results {resultDocuments.length}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={
+                      documentGroup === 'administrative' ? 'secondary' : 'ghost'
+                    }
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => setDocumentGroup('administrative')}
+                  >
+                    Administrative {administrativeDocuments.length}
+                  </Button>
+                </div>
+                {selectedClient ? (
+                  <Button size="sm" asChild>
+                    <Link href={`/clients/${selectedClient.id}/invoices/new`}>
+                      <FilePlus2 className="mr-1.5 h-3.5 w-3.5" />
+                      Add invoice
+                    </Link>
+                  </Button>
+                ) : (
+                  <Button size="sm" disabled>
+                    <FilePlus2 className="mr-1.5 h-3.5 w-3.5" />
+                    Add invoice
+                  </Button>
+                )}
               </div>
             </CardHeader>
             <CardContent className="p-0">
@@ -1022,13 +1201,14 @@ export function ClientManagerDashboard() {
                       <TableHead>Category</TableHead>
                       <TableHead>Year</TableHead>
                       <TableHead>Date</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {documentsToDisplay.length === 0 ? (
                       <TableRow>
                         <TableCell
-                          colSpan={4}
+                          colSpan={5}
                           className="text-center text-muted-foreground"
                         >
                           No documents.
@@ -1062,6 +1242,19 @@ export function ClientManagerDashboard() {
                         <TableCell>
                           {formatDate(document.inferred_document_date)}
                         </TableCell>
+                        <TableCell className="text-right">
+                          {document.category === 'analysis' ? (
+                            <Button size="sm" variant="outline" asChild>
+                              <a
+                                href={`/results?sourceDocumentId=${encodeURIComponent(document.id)}`}
+                                aria-label={`Visualize ${document.file_name} in Results`}
+                              >
+                                <BarChart3 className="mr-1.5 h-3.5 w-3.5" />
+                                Visualize
+                              </a>
+                            </Button>
+                          ) : null}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -1071,6 +1264,189 @@ export function ClientManagerDashboard() {
           </Card>
         </div>
       </section>
+
+      <dialog
+        ref={creditEventDialogRef}
+        onCancel={(event) => {
+          event.preventDefault();
+          setCreditEventDialogOpen(false);
+        }}
+        aria-labelledby="credit-event-title"
+        className="w-[calc(100%-1.5rem)] max-w-5xl rounded-lg border bg-card p-0 text-card-foreground shadow-xl backdrop:bg-slate-950/45 dark:backdrop:bg-slate-950/70"
+      >
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitCreditEvent();
+          }}
+        >
+          <div className="flex items-start justify-between gap-4 border-b px-5 py-4">
+            <div>
+              <h2 id="credit-event-title" className="text-lg font-semibold">
+                Add ledger event
+              </h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Top-ups are positive credit; analyses are negative adjustments.
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              onClick={() => setCreditEventDialogOpen(false)}
+              aria-label="Close add event"
+              title="Close"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+
+          <div className="px-5 py-4">
+            <CreditEventFormFields
+              draft={creditDraft}
+              idPrefix="add-credit-event"
+              onChange={(field, value) =>
+                updateCreditDraft(setCreditDraft, field, value)
+              }
+            />
+          </div>
+
+          <div className="flex justify-end gap-2 border-t px-5 py-4">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setCreditEventDialogOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={createEventMutation.isPending}>
+              {createEventMutation.isPending ? 'Adding...' : 'Add event'}
+            </Button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog
+        ref={clientDialogRef}
+        onCancel={(event) => {
+          event.preventDefault();
+          setClientDialogOpen(false);
+        }}
+        aria-labelledby="client-record-title"
+        className="w-[calc(100%-1.5rem)] max-w-xl rounded-lg border bg-card p-0 text-card-foreground shadow-xl backdrop:bg-slate-950/45 dark:backdrop:bg-slate-950/70"
+      >
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitClientRecord();
+          }}
+        >
+          <div className="flex items-start justify-between gap-4 border-b px-5 py-4">
+            <div>
+              <h2 id="client-record-title" className="text-lg font-semibold">
+                {clientDraft.id ? 'Edit client record' : 'Add client'}
+              </h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                These billing details are available when generating invoices.
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              onClick={() => setClientDialogOpen(false)}
+              aria-label="Close client record"
+              title="Close"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+
+          <div className="grid gap-4 px-5 py-4 sm:grid-cols-2">
+            <label className="space-y-1 sm:col-span-2">
+              <span className="text-xs font-medium">Client name</span>
+              <Input
+                value={clientDraft.name}
+                onChange={(event) =>
+                  setClientDraft((current) => ({
+                    ...current,
+                    name: event.target.value,
+                  }))
+                }
+                placeholder="Client or institution name"
+                required
+              />
+            </label>
+            <label className="space-y-1 sm:col-span-2">
+              <span className="text-xs font-medium">Billing address and details</span>
+              <textarea
+                value={clientDraft.billingDetails}
+                onChange={(event) =>
+                  setClientDraft((current) => ({
+                    ...current,
+                    billingDetails: event.target.value,
+                  }))
+                }
+                placeholder="Address, city, country, department, and billing identifiers"
+                className="flex min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs font-medium">Email</span>
+              <Input
+                type="email"
+                value={clientDraft.email}
+                onChange={(event) =>
+                  setClientDraft((current) => ({
+                    ...current,
+                    email: event.target.value,
+                  }))
+                }
+                placeholder="billing@example.org"
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-xs font-medium">Phone</span>
+              <Input
+                value={clientDraft.phone}
+                onChange={(event) =>
+                  setClientDraft((current) => ({
+                    ...current,
+                    phone: event.target.value,
+                  }))
+                }
+                placeholder="+55 ..."
+              />
+            </label>
+            <label className="space-y-1 sm:col-span-2">
+              <span className="text-xs font-medium">Tax ID</span>
+              <Input
+                value={clientDraft.taxId}
+                onChange={(event) =>
+                  setClientDraft((current) => ({
+                    ...current,
+                    taxId: event.target.value,
+                  }))
+                }
+                placeholder="CPF, CNPJ, VAT, or institutional tax ID"
+              />
+            </label>
+          </div>
+
+          <div className="flex justify-end gap-2 border-t px-5 py-4">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setClientDialogOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={saveClientMutation.isPending}>
+              {saveClientMutation.isPending ? 'Saving...' : 'Save client'}
+            </Button>
+          </div>
+        </form>
+      </dialog>
     </div>
   );
 }

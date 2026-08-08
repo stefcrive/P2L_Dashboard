@@ -7,28 +7,40 @@ import { PGlite, types } from '@electric-sql/pglite';
 
 import { getWorkspaceEnvironmentValue } from '@/lib/knowledge/config';
 
-import {
-  LOCAL_APP_SCHEMA_SQL,
-  LOCAL_APP_SCHEMA_VERSION,
-} from './schema';
+import { LOCAL_APP_SCHEMA_SQL, LOCAL_APP_SCHEMA_VERSION } from './schema';
+import { seedLabBookHistory } from '@/lib/lab-book/history';
 
 function findRepositoryRoot() {
   const candidates = [process.cwd(), path.resolve(process.cwd(), '..')];
   return (
-    candidates.find((candidate) => fs.existsSync(path.join(candidate, 'frontend'))) ??
-    process.cwd()
+    candidates.find((candidate) =>
+      fs.existsSync(path.join(candidate, 'frontend'))
+    ) ?? process.cwd()
   );
 }
 
 function getLocalAppDatabasePath() {
   const repositoryRoot = findRepositoryRoot();
   const configured =
-    getWorkspaceEnvironmentValue('APP_DATABASE_PATH') ?? '.local-data/app-postgres';
+    getWorkspaceEnvironmentValue('APP_DATABASE_PATH') ??
+    '.local-data/app-postgres';
   const databasePath = path.isAbsolute(configured)
     ? configured
     : path.resolve(repositoryRoot, configured);
   fs.mkdirSync(databasePath, { recursive: true });
   return databasePath;
+}
+
+async function getAppliedSchemaVersion(database: PGlite) {
+  const relation = await database.query<{ relation_name: string | null }>(
+    "SELECT to_regclass('app_local.schema_migrations')::text AS relation_name"
+  );
+  if (!relation.rows[0]?.relation_name) return 0;
+
+  const result = await database.query<{ version: number }>(
+    'SELECT COALESCE(max(version), 0)::integer AS version FROM app_local.schema_migrations'
+  );
+  return Number(result.rows[0]?.version ?? 0);
 }
 
 async function createLocalAppDatabase() {
@@ -42,7 +54,11 @@ async function createLocalAppDatabase() {
       [types.TIMESTAMPTZ]: String,
     },
   });
-  await database.exec(LOCAL_APP_SCHEMA_SQL);
+  const appliedSchemaVersion = await getAppliedSchemaVersion(database);
+  if (appliedSchemaVersion < LOCAL_APP_SCHEMA_VERSION) {
+    await database.exec(LOCAL_APP_SCHEMA_SQL);
+  }
+  await seedLabBookHistory(database);
   return database;
 }
 
@@ -54,17 +70,17 @@ declare global {
   // eslint-disable-next-line no-var
   var __localAppDatabaseSchemaVersion: number | undefined;
   // eslint-disable-next-line no-var
-  var __localAppDatabaseSchemaUpdate:
-    | Promise<LocalAppDatabase>
-    | undefined;
+  var __localAppDatabaseSchemaUpdate: Promise<LocalAppDatabase> | undefined;
 }
 
 export function getLocalAppDatabase() {
   if (!globalThis.__localAppDatabase) {
-    globalThis.__localAppDatabase = createLocalAppDatabase().then((database) => {
-      globalThis.__localAppDatabaseSchemaVersion = LOCAL_APP_SCHEMA_VERSION;
-      return database;
-    });
+    globalThis.__localAppDatabase = createLocalAppDatabase().then(
+      (database) => {
+        globalThis.__localAppDatabaseSchemaVersion = LOCAL_APP_SCHEMA_VERSION;
+        return database;
+      }
+    );
   }
 
   // Next.js keeps global state across development hot reloads. Re-run the
@@ -77,6 +93,7 @@ export function getLocalAppDatabase() {
     const schemaUpdate = globalThis.__localAppDatabase.then(
       async (database) => {
         await database.exec(LOCAL_APP_SCHEMA_SQL);
+        await seedLabBookHistory(database);
         globalThis.__localAppDatabaseSchemaVersion = LOCAL_APP_SCHEMA_VERSION;
         return database;
       }
@@ -97,8 +114,7 @@ export function getLocalAppDatabase() {
   }
 
   return (
-    globalThis.__localAppDatabaseSchemaUpdate ??
-    globalThis.__localAppDatabase
+    globalThis.__localAppDatabaseSchemaUpdate ?? globalThis.__localAppDatabase
   );
 }
 

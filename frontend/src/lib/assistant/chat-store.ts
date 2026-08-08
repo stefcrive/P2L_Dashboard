@@ -7,6 +7,17 @@ export interface AssistantMessage {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  attachments?: AssistantAttachment[];
+}
+
+export interface AssistantAttachment {
+  name: string;
+  type: string;
+  size: number;
+  uploadId?: string;
+  documentId?: string;
+  clientId?: string;
+  clientName?: string;
 }
 
 export interface AssistantConversation {
@@ -34,6 +45,11 @@ interface AssistantChatState extends PersistedAssistantState {
   addMessage: (
     conversationId: string,
     message: Omit<AssistantMessage, 'id' | 'createdAt'>
+  ) => string;
+  updateMessageAttachments: (
+    conversationId: string,
+    messageId: string,
+    attachments: AssistantAttachment[]
   ) => void;
   setPending: (conversationId: string, pending: boolean) => void;
   setError: (conversationId: string, error: string) => void;
@@ -151,6 +167,7 @@ export const useAssistantChatStore = create<AssistantChatState>((set, get) => ({
 
   addMessage: (conversationId, message) => {
     const now = new Date().toISOString();
+    const messageId = makeId('message');
     set((state) => ({
       conversations: state.conversations
         .map((conversation) => {
@@ -167,11 +184,28 @@ export const useAssistantChatStore = create<AssistantChatState>((set, get) => ({
             updatedAt: now,
             messages: [
               ...conversation.messages,
-              { ...message, id: makeId('message'), createdAt: now },
+              { ...message, id: messageId, createdAt: now },
             ],
           };
         })
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+    }));
+    persistState(get());
+    return messageId;
+  },
+
+  updateMessageAttachments: (conversationId, messageId, attachments) => {
+    set((state) => ({
+      conversations: state.conversations.map((conversation) =>
+        conversation.id === conversationId
+          ? {
+              ...conversation,
+              messages: conversation.messages.map((message) =>
+                message.id === messageId ? { ...message, attachments } : message
+              ),
+            }
+          : conversation
+      ),
     }));
     persistState(get());
   },
@@ -191,10 +225,12 @@ export const useAssistantChatStore = create<AssistantChatState>((set, get) => ({
 
 export async function sendAssistantMessage(
   content: string,
-  preferredConversationId?: string | null
+  preferredConversationId?: string | null,
+  files: File[] = []
 ) {
   const trimmed = content.trim();
-  if (!trimmed) return;
+  if (!trimmed && !files.length) return;
+  const messageText = trimmed || 'Review the attached file(s).';
 
   let store = useAssistantChatStore.getState();
   let conversationId = preferredConversationId ?? store.activeConversationId;
@@ -207,26 +243,43 @@ export async function sendAssistantMessage(
   }
 
   store.setError(conversationId, '');
-  store.addMessage(conversationId, { role: 'user', content: trimmed });
+  const userMessageId = store.addMessage(conversationId, {
+    role: 'user',
+    content: messageText,
+    attachments: files.map((file) => ({
+      name: file.name,
+      type: file.type || 'application/octet-stream',
+      size: file.size,
+    })),
+  });
   store.setPending(conversationId, true);
 
   try {
     const conversation = useAssistantChatStore
       .getState()
       .conversations.find((item) => item.id === conversationId);
+    const messages = (conversation?.messages ?? []).map(
+      ({ role, content: text, attachments }) => ({ role, content: text, attachments })
+    );
+    const formData = new FormData();
+    formData.set('messages', JSON.stringify(messages));
+    files.forEach((file) => formData.append('files', file));
     const response = await fetch('/api/assistant', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messages: (conversation?.messages ?? []).map(({ role, content: text }) => ({
-          role,
-          content: text,
-        })),
-      }),
+      body: formData,
     });
     const payload = (await response.json().catch(() => null)) as
-      | { message?: string; error?: string }
+      | {
+          message?: string;
+          error?: string;
+          attachments?: AssistantAttachment[];
+        }
       | null;
+    if (payload?.attachments?.length) {
+      useAssistantChatStore
+        .getState()
+        .updateMessageAttachments(conversationId, userMessageId, payload.attachments);
+    }
     if (!response.ok || !payload?.message) {
       throw new Error(payload?.error ?? `Request failed with status ${response.status}.`);
     }

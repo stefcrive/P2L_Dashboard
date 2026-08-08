@@ -37,6 +37,10 @@ const suggestions = [
     title: 'Maintenance check',
     prompt: 'Which equipment or lab-book items are due for attention?',
   },
+  {
+    title: 'Knowledge-base RAG',
+    prompt: '/knowledge How should I troubleshoot an IRMS leak?',
+  },
 ];
 
 function formatHistoryDate(value: string): string {
@@ -233,7 +237,8 @@ export function ChatWorkspace() {
                     </h1>
                     <p className="mx-auto mt-2 max-w-lg text-sm leading-6 text-slate-500 dark:text-slate-400">
                       Ask across clients, documents, inventory, results, finance, equipment,
-                      lab records, and backups. Explicit requests can also update stored data.
+                      lab records, and backups. Explicit requests can update stored data;
+                      begin with <span className="font-mono text-sky-600 dark:text-sky-400">/knowledge</span> for grounded RAG search.
                     </p>
                     <div className="mx-auto mt-7 overflow-hidden rounded-lg border border-slate-200 text-left dark:border-slate-800">
                       {suggestions.map((suggestion) => (
@@ -246,17 +251,17 @@ export function ChatWorkspace() {
                               conversation?.id
                             )
                           }
-                          className="group flex w-full items-center justify-between gap-4 border-b border-slate-200 px-4 py-3 last:border-b-0 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-900"
+                          className="group flex w-full items-start justify-between gap-4 border-b border-slate-200 px-4 py-3 text-left last:border-b-0 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-900"
                         >
-                          <span>
-                            <span className="block text-sm font-semibold text-slate-800 group-hover:text-sky-600 dark:text-slate-200 dark:group-hover:text-sky-400">
+                          <span className="min-w-0 flex-1 text-left">
+                            <span className="block text-left text-sm font-semibold text-slate-800 group-hover:text-sky-600 dark:text-slate-200 dark:group-hover:text-sky-400">
                               {suggestion.title}
                             </span>
                             <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
                               {suggestion.prompt}
                             </span>
                           </span>
-                          <ChevronRight className="h-4 w-4 shrink-0 text-slate-300 group-hover:text-sky-500 dark:text-slate-700" />
+                          <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-slate-300 group-hover:text-sky-500 dark:text-slate-700" />
                         </button>
                       ))}
                     </div>
@@ -290,8 +295,8 @@ export function ChatWorkspace() {
               <div className="mx-auto w-full max-w-4xl">
                 <ChatComposer
                   pending={pending}
-                  onSend={(message) =>
-                    sendAssistantMessage(message, conversation?.id)
+                  onSend={(message, files) =>
+                    sendAssistantMessage(message, conversation?.id, files)
                   }
                 />
                 <p className="-mt-2 pb-3 text-center font-mono text-[9px] uppercase tracking-[0.14em] text-slate-400 dark:text-slate-600">

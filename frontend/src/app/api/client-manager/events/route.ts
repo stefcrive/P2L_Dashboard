@@ -20,7 +20,8 @@ interface CreateCreditEventPayload {
   comment?: string | null;
 }
 
-interface UpdateCreditEventPayload extends Omit<CreateCreditEventPayload, 'clientId'> {
+interface UpdateCreditEventPayload
+  extends Omit<CreateCreditEventPayload, 'clientId'> {
   eventId?: string;
 }
 
@@ -91,9 +92,11 @@ function getReadableError(error: unknown): string {
 }
 
 function normalizeEventType(value: unknown): CreditEventType {
-  return CREDIT_EVENT_TYPES.includes(value as CreditEventType)
-    ? (value as CreditEventType)
-    : 'adjustment';
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return (
+    CREDIT_EVENT_TYPES.find((eventType) => eventType === normalized) ??
+    'adjustment'
+  );
 }
 
 function deriveEventAmount(
@@ -102,21 +105,31 @@ function deriveEventAmount(
   unitCost: number | null,
   amountOverride: number | null
 ): number | null {
-  if (amountOverride !== null) return amountOverride;
+  if (amountOverride !== null) {
+    return normalizeEventAmount(eventType, amountOverride);
+  }
   if (analysesCount === null || unitCost === null) return null;
 
-  const total = Math.abs(analysesCount * unitCost);
-  if (eventType === 'analysis') return -total;
-  if (eventType === 'credit_topup') return total;
-  return analysesCount * unitCost;
+  return normalizeEventAmount(eventType, analysesCount * unitCost);
+}
+
+function normalizeEventAmount(
+  eventType: CreditEventType,
+  amount: number | null
+): number | null {
+  if (amount === null) return null;
+
+  const absoluteAmount = Math.abs(amount);
+  if (eventType === 'analysis') return -absoluteAmount;
+  if (eventType === 'credit_topup') return absoluteAmount;
+  return amount;
 }
 
 async function rebalanceClientCreditEvents(
   supabase: ReturnType<typeof getSupabaseAdminClient>,
   clientId: string
 ): Promise<string | null> {
-  const creditEventsTable = supabase.from('client_credit_events') as any;
-  const { data, error } = await creditEventsTable
+  const { data, error } = await (supabase.from('client_credit_events') as any)
     .select(
       'id, source_type, amount, balance_before, balance_after, event_date, created_at'
     )
@@ -127,7 +140,11 @@ async function rebalanceClientCreditEvents(
   if (error) return error.message;
 
   let runningBalance: number | null = null;
-  const updates: Array<{ id: string; balanceBefore: number; balanceAfter: number }> = [];
+  const updates: Array<{
+    id: string;
+    balanceBefore: number;
+    balanceAfter: number;
+  }> = [];
 
   for (const event of (data ?? []) as LedgerBalanceEvent[]) {
     const amount = parseNullableNumber(event.amount) ?? 0;
@@ -159,7 +176,9 @@ async function rebalanceClientCreditEvents(
   }
 
   for (const update of updates) {
-    const { error: updateError } = await creditEventsTable
+    const { error: updateError } = await (
+      supabase.from('client_credit_events') as any
+    )
       .update({
         balance_before: update.balanceBefore,
         balance_after: update.balanceAfter,
@@ -173,15 +192,18 @@ async function rebalanceClientCreditEvents(
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json().catch(() => null)) as
-      | CreateCreditEventPayload
-      | null;
+    const body = (await request
+      .json()
+      .catch(() => null)) as CreateCreditEventPayload | null;
 
     const clientId = body?.clientId?.trim();
     const eventType = normalizeEventType(body?.eventType);
 
     if (!clientId) {
-      return NextResponse.json({ error: 'clientId is required.' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'clientId is required.' },
+        { status: 400 }
+      );
     }
 
     const analysesCount = parseNullableNumber(body?.analysesCount);
@@ -246,7 +268,9 @@ export async function POST(request: Request) {
     const balanceError = await rebalanceClientCreditEvents(supabase, clientId);
     if (balanceError) {
       return NextResponse.json(
-        { error: `Credit event was created, but its balance could not be updated: ${balanceError}` },
+        {
+          error: `Credit event was created, but its balance could not be updated: ${balanceError}`,
+        },
         { status: 500 }
       );
     }
@@ -257,7 +281,9 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     return NextResponse.json(
-      { error: `Unexpected create credit event error: ${getReadableError(error)}` },
+      {
+        error: `Unexpected create credit event error: ${getReadableError(error)}`,
+      },
       { status: 500 }
     );
   }
@@ -265,22 +291,40 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const body = (await request.json().catch(() => null)) as
-      | UpdateCreditEventPayload
-      | null;
+    const body = (await request
+      .json()
+      .catch(() => null)) as UpdateCreditEventPayload | null;
     const eventId = body?.eventId?.trim();
     if (!eventId) {
-      return NextResponse.json({ error: 'eventId is required.' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'eventId is required.' },
+        { status: 400 }
+      );
     }
 
     const updates: Record<string, unknown> = {};
-    const hasEventType = Object.prototype.hasOwnProperty.call(body, 'eventType');
-    const hasEventDate = Object.prototype.hasOwnProperty.call(body, 'eventDate');
-    const hasAnalysesCount = Object.prototype.hasOwnProperty.call(body, 'analysesCount');
-    const hasEquipment = Object.prototype.hasOwnProperty.call(body, 'equipment');
+    const hasEventType = Object.prototype.hasOwnProperty.call(
+      body,
+      'eventType'
+    );
+    const hasEventDate = Object.prototype.hasOwnProperty.call(
+      body,
+      'eventDate'
+    );
+    const hasAnalysesCount = Object.prototype.hasOwnProperty.call(
+      body,
+      'analysesCount'
+    );
+    const hasEquipment = Object.prototype.hasOwnProperty.call(
+      body,
+      'equipment'
+    );
     const hasUnitCost = Object.prototype.hasOwnProperty.call(body, 'unitCost');
     const hasAmount = Object.prototype.hasOwnProperty.call(body, 'amount');
-    const hasBalanceAfter = Object.prototype.hasOwnProperty.call(body, 'balanceAfter');
+    const hasBalanceAfter = Object.prototype.hasOwnProperty.call(
+      body,
+      'balanceAfter'
+    );
     const hasComment = Object.prototype.hasOwnProperty.call(body, 'comment');
 
     if (
@@ -293,16 +337,19 @@ export async function PATCH(request: Request) {
       !hasBalanceAfter &&
       !hasComment
     ) {
-      return NextResponse.json({ error: 'No fields to update.' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'No fields to update.' },
+        { status: 400 }
+      );
     }
 
     const supabase = getSupabaseAdminClient();
-    const creditEventsTable = supabase.from('client_credit_events') as any;
-    const { data: existingEvent, error: existingEventError } =
-      await creditEventsTable
-        .select('client_id, event_type')
-        .eq('id', eventId)
-        .maybeSingle();
+    const { data: existingEvent, error: existingEventError } = await (
+      supabase.from('client_credit_events') as any
+    )
+      .select('client_id, event_type, analyses_count, unit_cost, amount')
+      .eq('id', eventId)
+      .maybeSingle();
 
     if (existingEventError) {
       return NextResponse.json(
@@ -311,7 +358,10 @@ export async function PATCH(request: Request) {
       );
     }
     if (!existingEvent) {
-      return NextResponse.json({ error: 'Credit event not found.' }, { status: 404 });
+      return NextResponse.json(
+        { error: 'Credit event not found.' },
+        { status: 404 }
+      );
     }
 
     const eventType = hasEventType
@@ -321,14 +371,17 @@ export async function PATCH(request: Request) {
       updates.event_type = eventType;
     }
 
-    let parsedAnalysesCount: number | null = null;
-    let parsedUnitCost: number | null = null;
+    const parsedAnalysesCount = hasAnalysesCount
+      ? parseNullableNumber(body?.analysesCount)
+      : parseNullableNumber(existingEvent.analyses_count);
+    const parsedUnitCost = hasUnitCost
+      ? parseNullableNumber(body?.unitCost)
+      : parseNullableNumber(existingEvent.unit_cost);
 
     if (hasEventDate) {
       updates.event_date = parseNullableDate(body?.eventDate);
     }
     if (hasAnalysesCount) {
-      parsedAnalysesCount = parseNullableNumber(body?.analysesCount);
       updates.analyses_count = parsedAnalysesCount;
     }
     if (hasEquipment) {
@@ -338,7 +391,6 @@ export async function PATCH(request: Request) {
           : null;
     }
     if (hasUnitCost) {
-      parsedUnitCost = parseNullableNumber(body?.unitCost);
       updates.unit_cost = parsedUnitCost;
     }
     if (hasBalanceAfter) {
@@ -352,16 +404,23 @@ export async function PATCH(request: Request) {
     }
 
     const parsedAmount = hasAmount ? parseNullableNumber(body?.amount) : null;
-    if (hasAmount || (hasAnalysesCount && hasUnitCost)) {
+    if (hasAmount || hasAnalysesCount || hasUnitCost) {
       updates.amount = deriveEventAmount(
         eventType,
         parsedAnalysesCount,
         parsedUnitCost,
         parsedAmount
       );
+    } else if (hasEventType) {
+      updates.amount = normalizeEventAmount(
+        eventType,
+        parseNullableNumber(existingEvent.amount)
+      );
     }
 
-    const { data: updatedEvent, error: updateError } = await creditEventsTable
+    const { data: updatedEvent, error: updateError } = await (
+      supabase.from('client_credit_events') as any
+    )
       .update(updates)
       .eq('id', eventId)
       .select(CREDIT_EVENT_SELECT)
@@ -390,7 +449,9 @@ export async function PATCH(request: Request) {
     );
     if (balanceError) {
       return NextResponse.json(
-        { error: `Credit event was updated, but its balance could not be refreshed: ${balanceError}` },
+        {
+          error: `Credit event was updated, but its balance could not be refreshed: ${balanceError}`,
+        },
         { status: 500 }
       );
     }
@@ -401,7 +462,9 @@ export async function PATCH(request: Request) {
     });
   } catch (error) {
     return NextResponse.json(
-      { error: `Unexpected update credit event error: ${getReadableError(error)}` },
+      {
+        error: `Unexpected update credit event error: ${getReadableError(error)}`,
+      },
       { status: 500 }
     );
   }
@@ -409,21 +472,24 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const body = (await request.json().catch(() => null)) as
-      | DeleteCreditEventPayload
-      | null;
+    const body = (await request
+      .json()
+      .catch(() => null)) as DeleteCreditEventPayload | null;
     const eventId = body?.eventId?.trim();
     if (!eventId) {
-      return NextResponse.json({ error: 'eventId is required.' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'eventId is required.' },
+        { status: 400 }
+      );
     }
 
     const supabase = getSupabaseAdminClient();
-    const creditEventsTable = supabase.from('client_credit_events') as any;
-    const { data: existingEvent, error: existingEventError } =
-      await creditEventsTable
-        .select('client_id')
-        .eq('id', eventId)
-        .maybeSingle();
+    const { data: existingEvent, error: existingEventError } = await (
+      supabase.from('client_credit_events') as any
+    )
+      .select('client_id')
+      .eq('id', eventId)
+      .maybeSingle();
 
     if (existingEventError) {
       return NextResponse.json(
@@ -432,9 +498,16 @@ export async function DELETE(request: Request) {
       );
     }
     if (!existingEvent) {
-      return NextResponse.json({ error: 'Credit event not found.' }, { status: 404 });
+      return NextResponse.json(
+        { error: 'Credit event not found.' },
+        { status: 404 }
+      );
     }
-    const { error: deleteError } = await creditEventsTable.delete().eq('id', eventId);
+    const { error: deleteError } = await (
+      supabase.from('client_credit_events') as any
+    )
+      .delete()
+      .eq('id', eventId);
 
     if (deleteError) {
       if (hasMissingTableError(deleteError)) {
@@ -459,7 +532,9 @@ export async function DELETE(request: Request) {
     );
     if (balanceError) {
       return NextResponse.json(
-        { error: `Credit event was deleted, but its balance could not be refreshed: ${balanceError}` },
+        {
+          error: `Credit event was deleted, but its balance could not be refreshed: ${balanceError}`,
+        },
         { status: 500 }
       );
     }
@@ -470,7 +545,9 @@ export async function DELETE(request: Request) {
     });
   } catch (error) {
     return NextResponse.json(
-      { error: `Unexpected delete credit event error: ${getReadableError(error)}` },
+      {
+        error: `Unexpected delete credit event error: ${getReadableError(error)}`,
+      },
       { status: 500 }
     );
   }

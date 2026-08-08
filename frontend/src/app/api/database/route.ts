@@ -15,6 +15,7 @@ export const dynamic = 'force-dynamic';
 const DATA_TABLES = [
   'clients',
   'client_documents',
+  'assistant_uploads',
   'client_credit_events',
   'materials_inventory',
   'material_stock_movements',

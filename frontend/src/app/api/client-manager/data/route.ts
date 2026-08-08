@@ -262,10 +262,10 @@ function buildResponse(
     return total + Math.max(0, client.current_credit_balance);
   }, 0);
   const totalSpentAmount = filteredCreditEvents.reduce((total, event) => {
-    if (event.amount === null || event.amount <= 0) {
+    if (event.event_type !== 'analysis' || event.amount === null) {
       return total;
     }
-    return total + event.amount;
+    return total + Math.abs(event.amount);
   }, 0);
 
   return {

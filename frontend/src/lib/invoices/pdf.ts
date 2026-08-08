@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
-  degrees,
   PDFDocument,
   type PDFImage,
   type PDFPage,
@@ -40,6 +39,7 @@ export type InvoicePdfPayload = {
   paymentInstructions: PaymentInstructionMode;
   nationalPaymentDetails: string;
   internationalPaymentDetails: string;
+  footerNote: string;
 };
 
 const A4 = { width: 595.28, height: 841.89 };
@@ -169,15 +169,17 @@ function formatMoney(
 
 async function embedBrandImages(document: PDFDocument) {
   const logoRoot = path.join(findRepositoryRoot(), 'logos');
-  const [eachBytes, uspBytes, p2lBytes] = await Promise.all([
+  const [eachBytes, uspBytes, p2lBytes, watermarkBytes] = await Promise.all([
     fs.promises.readFile(path.join(logoRoot, 'Logo_EACH-USP.png')),
     fs.promises.readFile(path.join(logoRoot, 'USP-wordmark.png')),
     fs.promises.readFile(path.join(logoRoot, 'logo_pt.png')),
+    fs.promises.readFile(path.join(logoRoot, 'logo_sem_texto.png')),
   ]);
   return {
     each: await document.embedPng(eachBytes),
     usp: await document.embedPng(uspBytes),
     p2l: await document.embedPng(p2lBytes),
+    watermark: await document.embedPng(watermarkBytes),
   };
 }
 
@@ -190,46 +192,24 @@ function drawPaper(page: PDFPage) {
     color: rgb(0.995, 0.998, 1),
   });
   page.drawRectangle({
-    x: -32,
+    x: 0,
     y: 718,
-    width: 390,
+    width: A4.width,
     height: 146,
     color: cyan,
-    opacity: 0.025,
-  });
-  page.drawRectangle({
-    x: 456,
-    y: 695,
-    width: 180,
-    height: 34,
-    color: blue,
-    opacity: 0.045,
-    rotate: degrees(-12),
-  });
-  page.drawRectangle({
-    x: 472,
-    y: 636,
-    width: 170,
-    height: 30,
-    color: cyan,
-    opacity: 0.04,
-    rotate: degrees(-12),
-  });
-  page.drawRectangle({
-    x: -45,
-    y: 32,
-    width: 230,
-    height: 28,
-    color: orange,
-    opacity: 0.025,
-    rotate: degrees(8),
+    opacity: 0.028,
   });
 }
 
 function drawBrandHeader(
   page: PDFPage,
   fonts: { regular: any; bold: any },
-  images: { each: PDFImage; usp: PDFImage; p2l: PDFImage }
+  images: {
+    each: PDFImage;
+    usp: PDFImage;
+    p2l: PDFImage;
+    watermark: PDFImage;
+  }
 ) {
   const each = images.each.scaleToFit(34, 34);
   page.drawImage(images.each, {
@@ -299,6 +279,17 @@ function drawBrandHeader(
   });
 }
 
+function drawWatermark(page: PDFPage, image: PDFImage) {
+  const watermark = image.scaleToFit(310, 310);
+  page.drawImage(image, {
+    x: (A4.width - watermark.width) / 2,
+    y: (A4.height - watermark.height) / 2 - 22,
+    width: watermark.width,
+    height: watermark.height,
+    opacity: 0.045,
+  });
+}
+
 export async function createInvoicePdf(payload: InvoicePdfPayload) {
   const pdf = await PDFDocument.create();
   const fonts = {
@@ -320,6 +311,7 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
   let page = pdf.addPage([A4.width, A4.height]);
   pages.push(page);
   drawPaper(page);
+  drawWatermark(page, images.watermark);
   drawBrandHeader(page, fonts, images);
   let y = 722;
 
@@ -327,6 +319,7 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
     page = pdf.addPage([A4.width, A4.height]);
     pages.push(page);
     drawPaper(page);
+    drawWatermark(page, images.watermark);
     drawBrandHeader(page, fonts, images);
     y = 730;
   };
@@ -447,7 +440,7 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
       color: index === 0 ? navy : muted,
     });
   });
-  y = partyTop - 30 - partyLineCount * 12;
+  y = partyTop - 42 - partyLineCount * 12;
   ensureSpace(55);
   page.drawText(
     safePdfText(
@@ -464,7 +457,7 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
       color: navy,
     }
   );
-  y -= 40;
+  y -= 46;
 
   if (payload.serviceDescription.trim()) {
     drawLines(payload.serviceDescription, {
@@ -477,6 +470,14 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
   }
 
   ensureSpace(52 + payload.items.length * 38);
+  page.drawRectangle({
+    x: margin,
+    y: y - 8,
+    width: contentWidth,
+    height: 24,
+    color: cyan,
+    opacity: 0.075,
+  });
   page.drawText(labels.product, {
     x: margin,
     y,
@@ -485,28 +486,28 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
     color: muted,
   });
   page.drawText(labels.quantity, {
-    x: 332,
+    x: 312,
     y,
     size: 8,
     font: fonts.bold,
     color: muted,
   });
   page.drawText(labels.unitPrice, {
-    x: 392,
+    x: 380,
     y,
     size: 8,
     font: fonts.bold,
     color: muted,
   });
   page.drawText(labels.tax, {
-    x: 472,
+    x: 459,
     y,
     size: 8,
     font: fonts.bold,
     color: muted,
   });
   page.drawText(labels.total, {
-    x: 520,
+    x: 527,
     y,
     size: 8,
     font: fonts.bold,
@@ -526,7 +527,7 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
       item.description,
       fonts.regular,
       8.5,
-      276
+      232
     ).slice(0, 3);
     descriptionLines.forEach((text, index) =>
       page.drawText(text, {
@@ -537,22 +538,29 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
         color: navy,
       })
     );
-    page.drawText(formatNumber(item.quantity), {
-      x: 340,
+    const quantityText = formatNumber(item.quantity);
+    page.drawText(quantityText, {
+      x: 360 - fonts.regular.widthOfTextAtSize(quantityText, 8.5),
       y,
       size: 8.5,
       font: fonts.regular,
       color: navy,
     });
-    page.drawText(formatMoney(item.unitPrice, payload.currency, language), {
-      x: 392,
+    const unitPriceText = formatMoney(
+      item.unitPrice,
+      payload.currency,
+      language
+    );
+    page.drawText(unitPriceText, {
+      x: 440 - fonts.regular.widthOfTextAtSize(unitPriceText, 8.5),
       y,
       size: 8.5,
       font: fonts.regular,
       color: navy,
     });
-    page.drawText(`${formatNumber(payload.taxPercent)}%`, {
-      x: 472,
+    const taxText = `${formatNumber(payload.taxPercent)}%`;
+    page.drawText(taxText, {
+      x: 475 - fonts.regular.widthOfTextAtSize(taxText, 8.5),
       y,
       size: 8.5,
       font: fonts.regular,
@@ -648,40 +656,50 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
       details: payload.internationalPaymentDetails,
     });
   }
-  for (const section of paymentSections) {
-    ensureSpace(55);
-    page.drawText(section.title, {
-      x: margin,
-      y,
-      size: 9,
-      font: fonts.bold,
-      color: navy,
-    });
-    y -= 15;
-    if (section.details.trim()) {
-      drawLines(section.details, {
-        x: margin,
-        maxWidth: contentWidth,
-        size: 7.8,
-        leading: 10.5,
-        color: muted,
+  if (paymentSections.length) {
+    const paymentGap = 22;
+    const paymentWidth =
+      paymentSections.length === 2
+        ? (contentWidth - paymentGap) / 2
+        : contentWidth;
+    const wrappedSections = paymentSections.map((section) => ({
+      ...section,
+      lines: wrapText(
+        section.details.trim() ||
+          (language === 'pt'
+            ? 'Preencha os dados bancários antes de emitir.'
+            : 'Complete the bank details before issuing.'),
+        fonts.regular,
+        7.8,
+        paymentWidth
+      ),
+    }));
+    const paymentHeight =
+      25 +
+      Math.max(...wrappedSections.map((section) => section.lines.length)) *
+        10.5;
+    ensureSpace(paymentHeight);
+    const paymentTop = y;
+    wrappedSections.forEach((section, index) => {
+      const x = margin + index * (paymentWidth + paymentGap);
+      page.drawText(section.title, {
+        x,
+        y: paymentTop,
+        size: 9,
+        font: fonts.bold,
+        color: navy,
       });
-    } else {
-      page.drawText(
-        language === 'pt'
-          ? 'Preencha os dados bancários antes de emitir.'
-          : 'Complete the bank details before issuing.',
-        {
-          x: margin,
-          y,
+      section.lines.forEach((text, lineIndex) => {
+        page.drawText(text, {
+          x,
+          y: paymentTop - 16 - lineIndex * 10.5,
           size: 7.8,
           font: fonts.regular,
           color: muted,
-        }
-      );
-      y -= 10.5;
-    }
-    y -= 10;
+        });
+      });
+    });
+    y = paymentTop - paymentHeight;
   }
 
   if (payload.additionalInfo.trim()) {
@@ -704,10 +722,29 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
   }
 
   pages.forEach((currentPage, index) => {
-    const footer = `${labels.page} ${index + 1} / ${pages.length} · ${payload.invoiceNumber}`;
-    currentPage.drawText(safePdfText(footer), {
+    const footerLeft =
+      payload.footerNote.trim() ||
+      'P2L · EACH-USP · Universidade de São Paulo';
+    const footerRight = `${payload.invoiceNumber} · ${labels.page} ${index + 1} / ${pages.length}`;
+    currentPage.drawLine({
+      start: { x: margin, y: 39 },
+      end: { x: A4.width - margin, y: 39 },
+      thickness: 0.55,
+      color: line,
+    });
+    currentPage.drawText(safePdfText(footerLeft), {
       x: margin,
-      y: 34,
+      y: 24,
+      size: 6.8,
+      font: fonts.regular,
+      color: muted,
+    });
+    currentPage.drawText(safePdfText(footerRight), {
+      x:
+        A4.width -
+        margin -
+        fonts.regular.widthOfTextAtSize(safePdfText(footerRight), 6.8),
+      y: 24,
       size: 6.8,
       font: fonts.regular,
       color: muted,

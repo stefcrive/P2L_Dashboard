@@ -11,7 +11,6 @@ import {
   Boxes,
   Building2,
   Bot,
-  CircleDollarSign,
   FlaskConical,
   LayoutDashboard,
   LibraryBig,
@@ -26,7 +25,6 @@ const navigation = [
   { href: '/', label: 'Overview', icon: LayoutDashboard },
   { href: '/clients', label: 'Clients', icon: Users },
   { href: '/results', label: 'Results', icon: FlaskConical },
-  { href: '/finance', label: 'Finance', icon: CircleDollarSign },
   { href: '/materials', label: 'Inventory', icon: Boxes },
   { href: '/providers', label: 'Providers', icon: Building2 },
   { href: '/lab-book', label: 'Lab book', icon: BookOpenCheck },
@@ -41,6 +39,21 @@ type HeaderSummary = {
   maintenanceDue: number;
   lastBackupAt: string | null;
 };
+
+type DatabaseReadiness = {
+  ready: true;
+  source: 'local' | 'supabase';
+};
+
+async function fetchDatabaseReadiness(): Promise<DatabaseReadiness> {
+  const response = await fetch('/api/database/ready', {
+    cache: 'no-store',
+  });
+  if (!response.ok) {
+    throw new Error('Database unavailable');
+  }
+  return response.json();
+}
 
 async function fetchHeaderSummary(): Promise<HeaderSummary> {
   const response = await fetch('/api/operations/summary', {
@@ -65,6 +78,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const headerRef = useRef<HTMLElement>(null);
   const [now, setNow] = useState<Date | null>(null);
+  const readinessQuery = useQuery({
+    queryKey: ['database-readiness'],
+    queryFn: fetchDatabaseReadiness,
+    refetchInterval: 60_000,
+    retry: 4,
+    retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 8_000),
+  });
   const summaryQuery = useQuery({
     queryKey: ['operations-header-summary'],
     queryFn: fetchHeaderSummary,
@@ -103,8 +123,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   const summary = summaryQuery.data;
-  const databaseReady =
-    summary?.source === 'local' || summary?.source === 'supabase';
+  const databaseReady = readinessQuery.data?.ready === true;
+  const databaseStarting = readinessQuery.isPending || readinessQuery.isFetching;
 
   return (
     <div className="min-h-screen overflow-x-clip">
@@ -179,17 +199,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 'hidden items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[10px] lg:flex',
                 databaseReady
                   ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200'
+                  : databaseStarting
+                    ? 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200'
                   : 'border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200'
               )}
             >
               <span
                 className={cn(
                   'h-1.5 w-1.5 rounded-full',
-                  databaseReady ? 'bg-emerald-500' : 'bg-rose-500'
+                  databaseReady
+                    ? 'bg-emerald-500'
+                    : databaseStarting
+                      ? 'animate-pulse bg-amber-500'
+                      : 'bg-rose-500'
                 )}
                 aria-hidden="true"
               />
-              {databaseReady ? 'Local DB' : 'DB offline'}
+              {databaseReady
+                ? readinessQuery.data?.source === 'supabase'
+                  ? 'Supabase DB'
+                  : 'Local DB'
+                : databaseStarting
+                  ? 'DB starting'
+                  : 'DB offline'}
             </span>
             <ThemeToggle />
           </div>

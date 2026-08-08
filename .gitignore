@@ -7,6 +7,7 @@ dist/
 build/
 .next/
 .next-verify/
+.next-assistant-qa/
 __pycache__/
 *.pyc
 *.pyo
@@ -54,8 +55,15 @@ pids
 *.pid.lock
 .local-data/
 Merged_text_files/
+Raw ISOGEOCHEM data/
+cleanup_audit/
 LLM_processing/
 Results/
+!frontend/src/app/api/results/
+frontend/src/app/api/results/*
+!frontend/src/app/api/results/data/
+frontend/src/app/api/results/data/*
+!frontend/src/app/api/results/data/route.ts
 
 # Optional npm cache directory
 .npm

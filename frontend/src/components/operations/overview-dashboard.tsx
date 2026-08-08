@@ -113,8 +113,8 @@ export function OverviewDashboard() {
     {
       label: 'Open invoices',
       value: metrics?.openInvoices ?? 0,
-      href: '/finance',
-      detail: 'Follow up on sent and overdue invoices.',
+      href: '/clients',
+      detail: 'Review invoices within each client record.',
       tone: metrics?.openInvoices ? 'primary' : 'success',
     },
   ] as const;

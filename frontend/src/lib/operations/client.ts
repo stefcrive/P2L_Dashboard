@@ -49,6 +49,17 @@ export async function updateResource<T>(
   return result.data as T;
 }
 
+export async function deleteResource(
+  resource: string,
+  id: string
+): Promise<void> {
+  const response = await fetch(
+    `/api/operations/${resource}?id=${encodeURIComponent(id)}`,
+    { method: 'DELETE' }
+  );
+  await readJson(response);
+}
+
 export const selectClassName =
   'h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm focus:border-ring focus:outline-none focus:ring-2 focus:ring-ring/25';
 

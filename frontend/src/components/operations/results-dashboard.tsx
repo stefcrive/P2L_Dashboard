@@ -9,6 +9,8 @@ import {
   useState,
 } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import dynamic from 'next/dynamic';
+import type { PlotParams } from 'react-plotly.js';
 import {
   Download,
   Check,
@@ -51,6 +53,11 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { selectClassName } from '@/lib/operations/client';
+
+const Plot = dynamic<PlotParams>(
+  () => import('react-plotly.js').then((module) => module.default),
+  { ssr: false }
+);
 
 type Client = {
   id: string;
@@ -114,6 +121,7 @@ type ResultOptionRow = {
   identifier_1: string;
   identifier_2: string;
   species: string | null;
+  client: Client | null;
 };
 
 type ResultOptionsResponse = {
@@ -129,19 +137,19 @@ type FilterOption = {
 };
 
 type SearchFilters = {
-  identifier1: string;
-  identifier2: string;
+  identifier1: string[];
+  identifier2: string[];
   species: string[];
-  clientId: string;
-  resultFileId: string;
+  clientId: string[];
+  resultFileId: string[];
 };
 
 const emptyFilters: SearchFilters = {
-  identifier1: '',
-  identifier2: '',
+  identifier1: [],
+  identifier2: [],
   species: [],
-  clientId: '',
-  resultFileId: '',
+  clientId: [],
+  resultFileId: [],
 };
 
 const speciesColours = [
@@ -153,6 +161,7 @@ const speciesColours = [
 ];
 
 const speciesLineStyles = ['', '6 3', '2 2', '8 3 2 3', '1 3'];
+const plotlyLineStyles = ['solid', 'dash', 'dot', 'dashdot', 'longdash'] as const;
 
 function formatNumber(value: number | null, digits = 3) {
   if (value === null) return '—';
@@ -178,11 +187,7 @@ async function readJson(response: Response) {
 async function fetchResults(filters: SearchFilters): Promise<ResultsResponse> {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
-    if (Array.isArray(value)) {
-      value.forEach((item) => params.append(key, item));
-    } else if (value.trim()) {
-      params.set(key, value.trim());
-    }
+    value.forEach((item) => params.append(key, item));
   });
   const response = await fetch(
     `/api/results/data${params.size ? `?${params.toString()}` : ''}`,
@@ -287,15 +292,15 @@ function rowMatchesFilters(
 ) {
   if (
     excluded !== 'clientId' &&
-    filters.clientId &&
-    row.client_id !== filters.clientId
+    filters.clientId.length &&
+    !filters.clientId.includes(row.client_id)
   ) {
     return false;
   }
   if (
     excluded !== 'resultFileId' &&
-    filters.resultFileId &&
-    row.result_file_id !== filters.resultFileId
+    filters.resultFileId.length &&
+    !filters.resultFileId.includes(row.result_file_id)
   ) {
     return false;
   }
@@ -308,15 +313,15 @@ function rowMatchesFilters(
   }
   if (
     excluded !== 'identifier1' &&
-    filters.identifier1 &&
-    row.identifier_1 !== filters.identifier1
+    filters.identifier1.length &&
+    !filters.identifier1.includes(row.identifier_1)
   ) {
     return false;
   }
   if (
     excluded !== 'identifier2' &&
-    filters.identifier2 &&
-    row.identifier_2 !== filters.identifier2
+    filters.identifier2.length &&
+    !filters.identifier2.includes(row.identifier_2)
   ) {
     return false;
   }
@@ -352,8 +357,7 @@ function SearchableDropdown({
   const visibleOptions = options
     .filter((option) =>
       option.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
-    )
-    .slice(0, 150);
+    );
 
   useEffect(() => {
     setActiveIndex(0);
@@ -365,6 +369,8 @@ function SearchableDropdown({
         ? selectedValues.filter((value) => value !== option.value)
         : [...selectedValues, option.value];
       onChange(next);
+      setQuery('');
+      setOpen(true);
       return;
     }
     onChange(option.value);
@@ -404,6 +410,7 @@ function SearchableDropdown({
           aria-autocomplete="list"
           value={open || multiple ? query : selectedLabel}
           onFocus={() => setOpen(true)}
+          onClick={() => setOpen(true)}
           onBlur={() => window.setTimeout(() => setOpen(false), 120)}
           onChange={(event) => {
             setQuery(event.target.value);
@@ -489,12 +496,185 @@ function SearchableDropdown({
               }
               className="inline-flex max-w-full items-center gap-1 rounded-md border bg-muted/50 px-2 py-1 text-[10px] font-medium"
             >
-              <span className="truncate">{selected}</span>
+              <span className="truncate">
+                {options.find((option) => option.value === selected)?.label ??
+                  selected}
+              </span>
               <X className="h-3 w-3 shrink-0" />
             </button>
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function PlotlySequenceChart({
+  groups,
+  precisionPoint,
+  metric,
+  showLine,
+  showSymbols,
+  showPrecision,
+  symbolSize,
+  xAxisLabels,
+  hasSelection,
+}: {
+  groups: Array<[string, ChartPoint[]]>;
+  precisionPoint: ChartPoint | null;
+  metric: 'carbon' | 'oxygen';
+  showLine: boolean;
+  showSymbols: boolean;
+  showPrecision: boolean;
+  symbolSize: number;
+  xAxisLabels: Map<number, string>;
+  hasSelection: boolean;
+}) {
+  const traces: PlotParams['data'] = groups.map(([species, points], index) => ({
+    type: 'scatter',
+    mode:
+      showLine && showSymbols
+        ? 'lines+markers'
+        : showLine
+          ? 'lines'
+          : 'markers',
+    name: species,
+    x: points.map((point) => point.x),
+    y: points.map((point) => point.y),
+    customdata: points.map((point) => [
+      point.identifier1,
+      point.identifier2,
+      point.uncertainty,
+    ]),
+    line: {
+      color: speciesColours[index % speciesColours.length],
+      width: 1.5,
+      dash: plotlyLineStyles[index % plotlyLineStyles.length],
+    },
+    marker: {
+      color: speciesColours[index % speciesColours.length],
+      size: symbolSize * 2,
+      line: { color: '#ffffff', width: 1 },
+    },
+    hovertemplate:
+      '<b>%{fullData.name}</b><br>' +
+      '%{customdata[0]}<br>' +
+      'Identifier 2: %{customdata[1]}<br>' +
+      `${metric === 'carbon' ? 'δ13C' : 'δ18O'}: %{y:.3f} ‰<br>` +
+      'Precision: %{customdata[2]:.3f} ‰<extra></extra>',
+  }));
+
+  if (showPrecision && precisionPoint) {
+    traces.push({
+      type: 'scatter',
+      mode: 'markers',
+      name: precisionPoint.species,
+      x: [precisionPoint.x],
+      y: [precisionPoint.y],
+      marker: { color: '#334155', size: 5 },
+      error_y: {
+        type: 'data',
+        array: [precisionPoint.uncertainty ?? 0],
+        visible: true,
+        color: '#334155',
+        thickness: 1.5,
+        width: 5,
+      },
+      hovertemplate: `${precisionPoint.species}<extra></extra>`,
+    });
+  }
+
+  const tickEntries = Array.from(xAxisLabels.entries()).sort(
+    ([first], [second]) => first - second
+  );
+  const emptyMessage = hasSelection
+    ? 'No plottable measurements match these filters.'
+    : 'Select one or more filter items to plot measurements.';
+
+  return (
+    <Plot
+      data={traces}
+      layout={{
+        autosize: true,
+        height: 450,
+        margin: { t: 42, r: 20, b: 72, l: 72 },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#64748b', size: 11 },
+        hovermode: 'closest',
+        showlegend: traces.length > 0,
+        legend: { orientation: 'h', x: 1, xanchor: 'right', y: 1.12 },
+        xaxis: {
+          title: { text: 'Identifier 2 · sample number or depth' },
+          tickmode: 'array',
+          tickvals: tickEntries.map(([value]) => value),
+          ticktext: tickEntries.map(([, label]) => label),
+          gridcolor: '#cbd5e1',
+          zeroline: false,
+          rangeslider: { visible: traces.length > 0, thickness: 0.08 },
+        },
+        yaxis: {
+          title: { text: `${metric === 'carbon' ? 'δ13C' : 'δ18O'} (‰ VPDB)` },
+          gridcolor: '#cbd5e1',
+          zerolinecolor: '#94a3b8',
+        },
+        annotations:
+          traces.length === 0
+            ? [
+                {
+                  text: emptyMessage,
+                  x: 0.5,
+                  y: 0.5,
+                  xref: 'paper',
+                  yref: 'paper',
+                  showarrow: false,
+                  font: { color: '#64748b', size: 12 },
+                },
+              ]
+            : [],
+      }}
+      config={{ responsive: true, displaylogo: false }}
+      style={{ width: '100%', height: '450px' }}
+      useResizeHandler
+    />
+  );
+}
+
+function BlankSequenceChart({
+  metric,
+  hasSelection,
+}: {
+  metric: 'carbon' | 'oxygen';
+  hasSelection: boolean;
+}) {
+  const metricLabel = metric === 'carbon' ? 'δ13C' : 'δ18O';
+
+  return (
+    <div
+      className="relative h-[450px] w-full"
+      aria-label={`Empty ${metricLabel} isotope chart`}
+    >
+      <div className="absolute bottom-14 left-14 right-4 top-4 overflow-hidden border-b border-l">
+        <div
+          className="absolute inset-0 opacity-40"
+          style={{
+            backgroundImage:
+              'linear-gradient(to right, hsl(var(--border)) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border)) 1px, transparent 1px)',
+            backgroundSize: '10% 20%',
+          }}
+        />
+        <p className="absolute inset-0 grid place-items-center px-6 text-center text-xs text-muted-foreground">
+          {hasSelection
+            ? 'No plottable measurements match these filters.'
+            : 'Select one or more filter items to plot measurements.'}
+        </p>
+      </div>
+      <p className="absolute bottom-4 left-14 right-4 text-center text-[11px] text-muted-foreground">
+        Identifier 2 · sample number or depth
+      </p>
+      <p className="absolute bottom-14 left-0 top-4 grid w-10 place-items-center text-[11px] text-muted-foreground [writing-mode:vertical-rl] rotate-180">
+        {metricLabel} (‰ VPDB)
+      </p>
     </div>
   );
 }
@@ -558,11 +738,14 @@ function ResizableTableViewport({ children }: { children: React.ReactNode }) {
 
 export function ResultsDashboard() {
   const queryClient = useQueryClient();
+  const sourceDocumentLinkHandled = useRef(false);
+  const [linkedSourceDocumentId, setLinkedSourceDocumentId] = useState('');
   const [filters, setFilters] = useState<SearchFilters>(emptyFilters);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
   const [status, setStatus] = useState('');
   const [metric, setMetric] = useState<'carbon' | 'oxygen'>('carbon');
+  const [usePlotly, setUsePlotly] = useState(false);
   const [corrected, setCorrected] = useState(true);
   const [showLine, setShowLine] = useState(true);
   const [showSymbols, setShowSymbols] = useState(true);
@@ -632,13 +815,55 @@ export function ResultsDashboard() {
     () => new Map(resultFiles.map((file) => [file.id, file])),
     [resultFiles]
   );
+
+  useEffect(() => {
+    setLinkedSourceDocumentId(
+      new URLSearchParams(window.location.search).get('sourceDocumentId')?.trim() ??
+        ''
+    );
+  }, []);
+
+  useEffect(() => {
+    if (
+      sourceDocumentLinkHandled.current ||
+      !linkedSourceDocumentId ||
+      resultsQuery.isLoading
+    ) {
+      return;
+    }
+
+    sourceDocumentLinkHandled.current = true;
+    const linkedFile = resultFiles.find(
+      (file) => file.source_document_id === linkedSourceDocumentId
+    );
+
+    if (!linkedFile) {
+      setStatus(
+        'This result document has not been imported for visualization yet. Process the Results folder or upload it here.'
+      );
+      return;
+    }
+
+    setFilters({
+      ...emptyFilters,
+      clientId: [linkedFile.client_id],
+      resultFileId: [linkedFile.id],
+    });
+    setStatus(
+      `Visualizing ${linkedFile.source_document?.file_name ?? linkedFile.analysis_series}.`
+    );
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [linkedSourceDocumentId, resultFiles, resultsQuery.isLoading]);
   const clientById = useMemo(() => {
     const clients = new Map<string, string>();
     resultFiles.forEach((file) => {
       if (file.client) clients.set(file.client.id, file.client.name);
     });
+    optionRows.forEach((row) => {
+      if (row.client) clients.set(row.client.id, row.client.name);
+    });
     return clients;
-  }, [resultFiles]);
+  }, [optionRows, resultFiles]);
 
   const clientOptions = useMemo(
     () =>
@@ -708,17 +933,22 @@ export function ResultsDashboard() {
   const filteredResultFiles = useMemo(() => {
     const scientificFilterActive =
       filters.species.length > 0 ||
-      Boolean(filters.identifier1) ||
-      Boolean(filters.identifier2);
+      filters.identifier1.length > 0 ||
+      filters.identifier2.length > 0;
     return resultFiles.filter(
       (file) =>
-        (!filters.clientId || file.client_id === filters.clientId) &&
-        (!filters.resultFileId || file.id === filters.resultFileId) &&
+        (!filters.clientId.length || filters.clientId.includes(file.client_id)) &&
+        (!filters.resultFileId.length || filters.resultFileId.includes(file.id)) &&
         (!scientificFilterActive ||
           optionRows.length === 0 ||
           matchingFileIds.has(file.id))
     );
   }, [filters, matchingFileIds, optionRows.length, resultFiles]);
+
+  const hasChartSelection = useMemo(
+    () => Object.values(filters).some((value) => value.length > 0),
+    [filters]
+  );
 
   const chartGroups = useMemo(() => {
     const sorted = [...measurements].sort((first, second) => {
@@ -879,14 +1109,20 @@ export function ResultsDashboard() {
   ]);
 
   function clearSearch() {
-    setFilters({ ...emptyFilters, species: [] });
+    setFilters({
+      identifier1: [],
+      identifier2: [],
+      species: [],
+      clientId: [],
+      resultFileId: [],
+    });
   }
 
   function exploreFile(file: ResultFile) {
     const nextFilters = {
       ...emptyFilters,
-      resultFileId: file.id,
-      clientId: file.client_id,
+      resultFileId: [file.id],
+      clientId: [file.client_id],
     };
     setFilters(nextFilters);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -965,7 +1201,7 @@ export function ResultsDashboard() {
           <div className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
             <SectionPanel
               title="Search results"
-              description="Choose filters in order; every dropdown narrows the options that follow."
+              description="Select one or more items in any field; each choice narrows the available options."
             >
               <div className="space-y-3">
                 <SearchableDropdown
@@ -973,11 +1209,11 @@ export function ResultsDashboard() {
                   label="Client"
                   options={clientOptions}
                   value={filters.clientId}
+                  multiple
                   onChange={(value) =>
                     setFilters({
                       ...emptyFilters,
-                      clientId: String(value),
-                      species: [],
+                      clientId: value as string[],
                     })
                   }
                   placeholder={
@@ -989,16 +1225,17 @@ export function ResultsDashboard() {
                   label="Result file"
                   options={fileOptions}
                   value={filters.resultFileId}
+                  multiple
                   onChange={(value) =>
                     setFilters((current) => ({
                       ...current,
-                      resultFileId: String(value),
+                      resultFileId: value as string[],
                       species: [],
-                      identifier1: '',
-                      identifier2: '',
+                      identifier1: [],
+                      identifier2: [],
                     }))
                   }
-                  placeholder="All result files"
+                  placeholder="Select one or more result files"
                 />
                 <SearchableDropdown
                   id="result-species-filter"
@@ -1010,8 +1247,8 @@ export function ResultsDashboard() {
                     setFilters((current) => ({
                       ...current,
                       species: value as string[],
-                      identifier1: '',
-                      identifier2: '',
+                      identifier1: [],
+                      identifier2: [],
                     }))
                   }
                   placeholder="Select one or more species"
@@ -1021,11 +1258,12 @@ export function ResultsDashboard() {
                   label="Identifier 1"
                   options={identifier1Options}
                   value={filters.identifier1}
+                  multiple
                   onChange={(value) =>
                     setFilters((current) => ({
                       ...current,
-                      identifier1: String(value),
-                      identifier2: '',
+                      identifier1: value as string[],
+                      identifier2: [],
                     }))
                   }
                   placeholder="Sediment core or record ID"
@@ -1035,10 +1273,11 @@ export function ResultsDashboard() {
                   label="Identifier 2"
                   options={identifier2Options}
                   value={filters.identifier2}
+                  multiple
                   onChange={(value) =>
                     setFilters((current) => ({
                       ...current,
-                      identifier2: String(value),
+                      identifier2: value as string[],
                     }))
                   }
                   placeholder="Sample number or depth"
@@ -1066,6 +1305,15 @@ export function ResultsDashboard() {
               description="Line and symbols follow Identifier 2; colour and stroke pattern separate species. Drag the lower navigator to zoom."
               actions={
                 <div className="flex flex-wrap items-center gap-2">
+                  <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={usePlotly}
+                      onChange={(event) => setUsePlotly(event.target.checked)}
+                      className="h-3.5 w-3.5 accent-blue-600"
+                    />
+                    Plotly chart
+                  </label>
                   <div className="flex rounded-md border bg-muted/30 p-0.5">
                     <Button
                       size="sm"
@@ -1147,7 +1395,21 @@ export function ResultsDashboard() {
                 </div>
               }
             >
-              {chartGroups.length ? (
+              {usePlotly ? (
+                <PlotlySequenceChart
+                  groups={hasChartSelection ? visibleChartGroups : []}
+                  precisionPoint={
+                    hasChartSelection ? displayPrecisionPoint : null
+                  }
+                  metric={metric}
+                  showLine={showLine}
+                  showSymbols={showSymbols}
+                  showPrecision={showPrecision}
+                  symbolSize={symbolSize}
+                  xAxisLabels={hasChartSelection ? xAxisLabels : new Map()}
+                  hasSelection={hasChartSelection}
+                />
+              ) : hasChartSelection && chartGroups.length ? (
                 <div className="h-[450px] w-full">
                   <ResponsiveContainer width="100%" height="100%">
                     <ScatterChart
@@ -1303,19 +1565,20 @@ export function ResultsDashboard() {
                   </ResponsiveContainer>
                 </div>
               ) : (
-                <EmptyState
-                  title="No plottable measurements"
-                  description="Choose a result file or adjust the scientific search fields."
+                <BlankSequenceChart
+                  metric={metric}
+                  hasSelection={hasChartSelection}
                 />
               )}
             </SectionPanel>
           </div>
 
-          <SectionPanel
-            title="Measurement results"
-            description={`${Math.min(measurements.length, 300)} rows shown with source-file provenance.`}
-            bodyClassName="p-0"
-          >
+          <div className="grid items-start gap-5 xl:grid-cols-2">
+            <SectionPanel
+              title="Measurement results"
+              description={`${Math.min(measurements.length, 300)} rows shown with source-file provenance.`}
+              bodyClassName="p-0"
+            >
             {measurements.length ? (
               <ResizableTableViewport>
                 <Table>
@@ -1387,16 +1650,18 @@ export function ResultsDashboard() {
                 description="Search by Identifier 1, Identifier 2, species, client, or result file."
               />
             )}
-          </SectionPanel>
+            </SectionPanel>
 
-          <SectionPanel
-            title="Result files"
-            description={`${filteredResultFiles.length} of ${resultFiles.length} parsed workbooks match the active search.`}
-            bodyClassName="p-0"
-          >
+            <SectionPanel
+              title="Result files"
+              description={`${filteredResultFiles.length} of ${resultFiles.length} parsed workbooks match the active search.`}
+              bodyClassName="p-0"
+            >
             {filteredResultFiles.length ? (
-              <div className="overflow-x-auto">
-                <Table>
+                <Table
+                  containerClassName="max-w-full"
+                  className="min-w-[820px]"
+                >
                   <TableHeader>
                     <TableRow>
                       <TableHead>File</TableHead>
@@ -1405,12 +1670,14 @@ export function ResultsDashboard() {
                       <TableHead>Date</TableHead>
                       <TableHead className="text-right">Records</TableHead>
                       <TableHead>Status</TableHead>
-                      <TableHead>Actions</TableHead>
+                      <TableHead className="sticky right-0 z-20 border-l bg-slate-50 shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.5)] dark:bg-slate-900">
+                        Actions
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {filteredResultFiles.map((file) => (
-                      <TableRow key={file.id}>
+                      <TableRow key={file.id} className="group">
                         <TableCell>
                           <div className="flex items-start gap-2">
                             <FileSpreadsheet className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700 dark:text-emerald-300" />
@@ -1452,7 +1719,7 @@ export function ResultsDashboard() {
                             {file.status}
                           </StatusPill>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="sticky right-0 z-10 border-l bg-card shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.5)] group-hover:bg-muted/50">
                           <div className="flex gap-1.5">
                             <Button
                               size="sm"
@@ -1479,7 +1746,6 @@ export function ResultsDashboard() {
                     ))}
                   </TableBody>
                 </Table>
-              </div>
             ) : (
               <EmptyState
                 title={
@@ -1494,7 +1760,8 @@ export function ResultsDashboard() {
                 }
               />
             )}
-          </SectionPanel>
+            </SectionPanel>
+          </div>
         </>
       )}
     </div>

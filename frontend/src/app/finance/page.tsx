@@ -1,5 +1,5 @@
-import { FinanceDashboard } from '@/components/operations/finance-dashboard';
+import { redirect } from 'next/navigation';
 
 export default function FinancePage() {
-  return <FinanceDashboard />;
+  redirect('/clients');
 }

@@ -1,5 +1,19 @@
 import 'server-only';
 
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
+import {
+  attachAssistantUploadToClient,
+  importAssistantResultUpload,
+} from '@/lib/assistant/uploads';
+import {
+  createGmailDraft,
+  readGmailMessage,
+  searchGmail,
+  sendGmailMessage,
+} from '@/lib/gmail/client';
+import { resolveClientiRootPath } from '@/lib/client-manager/paths';
 import { getSupabaseAdminClient } from '@/lib/supabase/admin';
 
 type JsonObject = Record<string, unknown>;
@@ -17,8 +31,38 @@ const ENTITY_CONFIG = {
   client: {
     table: 'clients',
     label: 'clients',
-    searchable: ['name', 'folder_slug'],
-    writable: ['name', 'first_seen_year', 'last_seen_year', 'categories'],
+    searchable: [
+      'name',
+      'folder_slug',
+      'billing_details',
+      'email',
+      'phone',
+      'tax_id',
+    ],
+    writable: [
+      'name',
+      'folder_slug',
+      'billing_details',
+      'email',
+      'phone',
+      'tax_id',
+      'first_seen_year',
+      'last_seen_year',
+      'total_documents',
+      'categories',
+    ],
+    creatable: [
+      'name',
+      'folder_slug',
+      'billing_details',
+      'email',
+      'phone',
+      'tax_id',
+      'first_seen_year',
+      'last_seen_year',
+      'total_documents',
+      'categories',
+    ],
     orderBy: 'updated_at',
   },
   document: {
@@ -31,11 +75,28 @@ const ENTITY_CONFIG = {
       'inferred_document_number',
     ],
     writable: [
+      'client_id',
       'file_name',
+      'relative_path',
+      'absolute_path',
       'year',
+      'extension',
       'category',
       'inferred_document_number',
       'inferred_document_date',
+      'file_size_bytes',
+    ],
+    creatable: [
+      'client_id',
+      'file_name',
+      'relative_path',
+      'absolute_path',
+      'year',
+      'extension',
+      'category',
+      'inferred_document_number',
+      'inferred_document_date',
+      'file_size_bytes',
     ],
     orderBy: 'updated_at',
   },
@@ -92,6 +153,24 @@ const ENTITY_CONFIG = {
       'minimum_stock',
       'unit',
       'supplier_reference',
+      'notes',
+    ],
+    creatable: [
+      'normalized_key',
+      'name',
+      'part_number',
+      'description',
+      'material_type',
+      'equipment',
+      'quantity_text',
+      'suggested_stock',
+      'current_stock',
+      'minimum_stock',
+      'unit',
+      'supplier_reference',
+      'source_file',
+      'source_sheet',
+      'source_path',
       'notes',
     ],
     orderBy: 'updated_at',
@@ -630,6 +709,107 @@ function pickAllowedFields(input: unknown, allowed: string[]): JsonObject {
   );
 }
 
+function slugify(value: string, fallback: string): string {
+  const slug = value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || fallback;
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = typeof value === 'number' ? value : Number(String(value).replace(',', '.'));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeCreditEventAmount(eventType: string, amount: number | null) {
+  if (amount === null) return null;
+  const absoluteAmount = Math.abs(amount);
+  if (eventType === 'analysis') return -absoluteAmount;
+  if (eventType === 'credit_topup') return absoluteAmount;
+  return amount;
+}
+
+function deriveCreditEventAmount(
+  eventType: string,
+  analysesCount: number | null,
+  unitCost: number | null,
+  amountOverride: number | null
+) {
+  if (amountOverride !== null) {
+    return normalizeCreditEventAmount(eventType, amountOverride);
+  }
+  if (analysesCount === null || unitCost === null) return null;
+  return normalizeCreditEventAmount(eventType, analysesCount * unitCost);
+}
+
+async function refreshClientRollup(clientId: string | null | undefined) {
+  if (!clientId) return;
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase
+    .from('client_documents')
+    .select('category, year')
+    .eq('client_id', clientId);
+  if (error) throw new Error(`Unable to refresh client document totals: ${error.message}`);
+
+  const rows = (data ?? []) as Array<{ category: string; year: number | null }>;
+  const years = rows
+    .map((row) => row.year)
+    .filter((year): year is number => typeof year === 'number');
+  const categories = Array.from(new Set(rows.map((row) => row.category).filter(Boolean)));
+  const clientsTable = supabase.from('clients') as any;
+  const { error: updateError } = await clientsTable
+    .update({
+      total_documents: rows.length,
+      categories,
+      first_seen_year: years.length ? Math.min(...years) : null,
+      last_seen_year: years.length ? Math.max(...years) : null,
+    })
+    .eq('id', clientId);
+  if (updateError) {
+    throw new Error(`Unable to update client document totals: ${updateError.message}`);
+  }
+}
+
+async function rebalanceClientCreditEvents(clientId: string | null | undefined) {
+  if (!clientId) return;
+  const supabase = getSupabaseAdminClient();
+  const table = supabase.from('client_credit_events') as any;
+  const { data, error } = await table
+    .select('id, source_type, amount, balance_before, balance_after, event_date, created_at')
+    .eq('client_id', clientId)
+    .order('event_date', { ascending: true, nullsFirst: false })
+    .order('created_at', { ascending: true });
+  if (error) throw new Error(`Unable to rebalance the client ledger: ${error.message}`);
+
+  let runningBalance: number | null = null;
+  for (const event of data ?? []) {
+    const amount = nullableNumber(event.amount) ?? 0;
+    const storedBefore = nullableNumber(event.balance_before);
+    const storedAfter = nullableNumber(event.balance_after);
+    if (event.source_type === 'spreadsheet') {
+      if (storedAfter !== null) runningBalance = storedAfter;
+      else if (storedBefore !== null) runningBalance = storedBefore + amount;
+      continue;
+    }
+
+    const balanceBefore = runningBalance ?? 0;
+    const balanceAfter = balanceBefore + amount;
+    if (storedBefore !== balanceBefore || storedAfter !== balanceAfter) {
+      const { error: updateError } = await table
+        .update({ balance_before: balanceBefore, balance_after: balanceAfter })
+        .eq('id', event.id);
+      if (updateError) {
+        throw new Error(`Unable to rebalance the client ledger: ${updateError.message}`);
+      }
+    }
+    runningBalance = balanceAfter;
+  }
+}
+
 export async function updatePlatformRecord(args: JsonObject) {
   const entity = args.entity;
   const id = String(args.id ?? '').trim();
@@ -644,8 +824,51 @@ export async function updatePlatformRecord(args: JsonObject) {
 
   const supabase = getSupabaseAdminClient();
   const table = supabase.from(config.table) as any;
+  let previousRecord: Record<string, unknown> | null = null;
+  if (entity === 'credit_event' || entity === 'document') {
+    const { data: existing, error: existingError } = await table
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (existingError) throw new Error(`Unable to load ${entity}: ${existingError.message}`);
+    previousRecord = existing;
+  }
+  if (entity === 'credit_event') {
+    const eventType = String(fields.event_type ?? previousRecord?.event_type ?? 'adjustment');
+    const analysesCount = nullableNumber(
+      fields.analyses_count ?? previousRecord?.analyses_count
+    );
+    const unitCost = nullableNumber(fields.unit_cost ?? previousRecord?.unit_cost);
+    const shouldRecalculate =
+      Object.prototype.hasOwnProperty.call(fields, 'amount') ||
+      Object.prototype.hasOwnProperty.call(fields, 'analyses_count') ||
+      Object.prototype.hasOwnProperty.call(fields, 'unit_cost');
+
+    if (shouldRecalculate) {
+      fields.amount = deriveCreditEventAmount(
+        eventType,
+        analysesCount,
+        unitCost,
+        Object.prototype.hasOwnProperty.call(fields, 'amount')
+          ? nullableNumber(fields.amount)
+          : null
+      );
+    } else if (Object.prototype.hasOwnProperty.call(fields, 'event_type')) {
+      fields.amount = normalizeCreditEventAmount(
+        eventType,
+        nullableNumber(previousRecord?.amount)
+      );
+    }
+  }
   const { data, error } = await table.update(fields).eq('id', id).select().single();
   if (error) throw new Error(`Unable to update ${entity}: ${error.message}`);
+  if (entity === 'credit_event') {
+    await rebalanceClientCreditEvents(String(data.client_id ?? previousRecord?.client_id ?? ''));
+  }
+  if (entity === 'document') {
+    await refreshClientRollup(String(previousRecord?.client_id ?? ''));
+    await refreshClientRollup(String(data.client_id ?? ''));
+  }
   return {
     success: true,
     action: 'updated',
@@ -666,11 +889,181 @@ export async function createPlatformRecord(args: JsonObject) {
     throw new Error(`No valid ${entity} fields were provided.`);
   }
 
+  if (entity === 'client') {
+    const name = String(fields.name ?? '').trim();
+    if (!name) throw new Error('A client name is required.');
+    fields.name = name;
+    fields.folder_slug =
+      String(fields.folder_slug ?? '').trim() || slugify(name, 'client');
+    fields.categories = Array.isArray(fields.categories) ? fields.categories : [];
+  }
+  if (entity === 'material') {
+    const name = String(fields.name ?? '').trim();
+    if (!name) throw new Error('A material name is required.');
+    fields.name = name;
+    fields.normalized_key =
+      String(fields.normalized_key ?? '').trim() ||
+      `assistant-${slugify(`${name}-${String(fields.part_number ?? '')}`, 'material')}-${Date.now()}`;
+    fields.material_type = String(fields.material_type ?? '').trim() || 'other';
+    fields.source_file = String(fields.source_file ?? '').trim() || 'Assistant';
+    fields.source_path = String(fields.source_path ?? '').trim() || 'assistant';
+  }
+  if (entity === 'credit_event') {
+    const clientId = String(fields.client_id ?? '').trim();
+    if (!clientId) throw new Error('client_id is required for a credit event.');
+    fields.client_id = clientId;
+    fields.source_type = 'manual';
+    fields.source_sheet = '';
+    const eventType = String(fields.event_type ?? 'adjustment');
+    fields.amount = deriveCreditEventAmount(
+      eventType,
+      nullableNumber(fields.analyses_count),
+      nullableNumber(fields.unit_cost),
+      nullableNumber(fields.amount)
+    );
+    fields.balance_before = null;
+    fields.balance_after = null;
+  }
+
   const supabase = getSupabaseAdminClient();
   const table = supabase.from(config.table) as any;
   const { data, error } = await table.insert(fields).select().single();
   if (error) throw new Error(`Unable to create ${entity}: ${error.message}`);
+  if (entity === 'credit_event') await rebalanceClientCreditEvents(String(data.client_id));
+  if (entity === 'document') await refreshClientRollup(String(data.client_id));
   return { success: true, action: 'created', entity, record: data };
+}
+
+const DELETABLE_ENTITIES = new Set<PlatformEntity>([
+  'client',
+  'document',
+  'credit_event',
+  'material',
+  'lab_entry',
+]);
+
+export async function deletePlatformRecord(args: JsonObject) {
+  const entity = args.entity;
+  const id = String(args.id ?? '').trim();
+  if (!isEntity(entity) || !DELETABLE_ENTITIES.has(entity)) {
+    throw new Error('This entity cannot be removed through the assistant.');
+  }
+  if (!id) throw new Error('A record id is required.');
+
+  const config = ENTITY_CONFIG[entity];
+  const supabase = getSupabaseAdminClient();
+  const table = supabase.from(config.table) as any;
+  const { data: record, error: loadError } = await table
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+  if (loadError) throw new Error(`Unable to load ${entity}: ${loadError.message}`);
+  if (!record) throw new Error(`${config.label} record not found.`);
+
+  const { error } = await table.delete().eq('id', id);
+  if (error) throw new Error(`Unable to remove ${entity}: ${error.message}`);
+  if (entity === 'credit_event') {
+    await rebalanceClientCreditEvents(String(record.client_id ?? ''));
+  }
+  if (entity === 'document') {
+    await refreshClientRollup(String(record.client_id ?? ''));
+  }
+  return {
+    success: true,
+    action: 'deleted',
+    entity,
+    deleted_record: record,
+    note:
+      entity === 'client' || entity === 'document'
+        ? 'The database record was removed; the source file on disk was not deleted.'
+        : undefined,
+  };
+}
+
+export async function annexDocumentToClient(args: JsonObject) {
+  const clientId = String(args.client_id ?? '').trim();
+  const sourcePath = String(args.source_path ?? '').trim();
+  if (!clientId) throw new Error('client_id is required.');
+  if (!sourcePath) throw new Error('source_path is required.');
+
+  const supabase = getSupabaseAdminClient();
+  const { data: client, error: clientError } = await supabase
+    .from('clients')
+    .select('id, name')
+    .eq('id', clientId)
+    .maybeSingle();
+  if (clientError) throw new Error(`Unable to load client: ${clientError.message}`);
+  if (!client) throw new Error('Client not found.');
+
+  const clientiRoot = path.resolve(await resolveClientiRootPath());
+  const absolutePath = path.resolve(
+    path.isAbsolute(sourcePath) ? sourcePath : path.join(clientiRoot, sourcePath)
+  );
+  const relativeCheck = path.relative(clientiRoot, absolutePath);
+  if (relativeCheck.startsWith('..') || path.isAbsolute(relativeCheck)) {
+    throw new Error('Documents must be inside the configured Clienti folder.');
+  }
+  const stats = await fs.stat(absolutePath).catch(() => null);
+  if (!stats?.isFile()) throw new Error('The document file does not exist.');
+
+  const relativePath = relativeCheck.split(path.sep).join('/');
+  const extension = path.extname(absolutePath).replace(/^\./, '').toLowerCase() || 'file';
+  const suppliedYear = nullableNumber(args.year);
+  const inferredYear = relativePath.match(/(?:^|\/)(20\d{2})(?:\/|$)/)?.[1];
+  const year = suppliedYear ?? (inferredYear ? Number(inferredYear) : null);
+  const allowedCategories = new Set([
+    'quote',
+    'invoice',
+    'payment_slip',
+    'payment_receipt',
+    'credit',
+    'purchase_order',
+    'shipping',
+    'analysis',
+    'other',
+  ]);
+  const requestedCategory = String(args.category ?? 'other');
+  const category = allowedCategories.has(requestedCategory) ? requestedCategory : 'other';
+  const documentsTable = supabase.from('client_documents') as any;
+  const { data: existing, error: existingError } = await documentsTable
+    .select('id, client_id')
+    .eq('relative_path', relativePath)
+    .maybeSingle();
+  if (existingError) {
+    throw new Error(`Unable to inspect the document record: ${existingError.message}`);
+  }
+
+  const payload = {
+    client_id: clientId,
+    file_name: path.basename(absolutePath),
+    relative_path: relativePath,
+    absolute_path: absolutePath,
+    year,
+    extension,
+    category,
+    inferred_document_number:
+      typeof args.document_number === 'string' && args.document_number.trim()
+        ? args.document_number.trim()
+        : null,
+    inferred_document_date:
+      typeof args.document_date === 'string' && args.document_date.trim()
+        ? args.document_date.trim()
+        : null,
+    file_size_bytes: stats.size,
+  };
+  const result = existing
+    ? await documentsTable.update(payload).eq('id', existing.id).select().single()
+    : await documentsTable.insert(payload).select().single();
+  if (result.error) throw new Error(`Unable to annex document: ${result.error.message}`);
+
+  await refreshClientRollup(String(existing?.client_id ?? ''));
+  await refreshClientRollup(clientId);
+  return {
+    success: true,
+    action: existing ? 'reassigned_document' : 'annexed_document',
+    client: { id: client.id, name: client.name },
+    record: result.data,
+  };
 }
 
 export async function adjustMaterialStock(args: JsonObject) {
@@ -789,8 +1182,41 @@ export async function executePlatformTool(name: string, args: JsonObject) {
     if (name === 'get_record_details') return await getRecordDetails(args);
     if (name === 'update_record_fields') return await updatePlatformRecord(args);
     if (name === 'create_record') return await createPlatformRecord(args);
+    if (name === 'delete_record') return await deletePlatformRecord(args);
+    if (name === 'annex_document_to_client') return await annexDocumentToClient(args);
+    if (name === 'attach_uploaded_file_to_client') {
+      return await attachAssistantUploadToClient(args);
+    }
+    if (name === 'import_uploaded_result_file') {
+      return await importAssistantResultUpload(args);
+    }
     if (name === 'adjust_material_stock') return await adjustMaterialStock(args);
     if (name === 'get_report_data') return await getReportData(args);
+    if (name === 'search_gmail') {
+      return await searchGmail({
+        query: String(args.query ?? ''),
+        maxResults: Number(args.max_results ?? 10),
+      });
+    }
+    if (name === 'read_gmail_message') {
+      return await readGmailMessage(String(args.message_id ?? ''));
+    }
+    if (name === 'create_gmail_draft') {
+      return await createGmailDraft({
+        to: Array.isArray(args.to) ? args.to.map(String) : [],
+        cc: Array.isArray(args.cc) ? args.cc.map(String) : [],
+        subject: String(args.subject ?? ''),
+        body: String(args.body ?? ''),
+      });
+    }
+    if (name === 'send_gmail_email') {
+      return await sendGmailMessage({
+        to: Array.isArray(args.to) ? args.to.map(String) : [],
+        cc: Array.isArray(args.cc) ? args.cc.map(String) : [],
+        subject: String(args.subject ?? ''),
+        body: String(args.body ?? ''),
+      });
+    }
     throw new Error(`Unknown assistant tool: ${name}`);
   } catch (error) {
     return { success: false, error: readableError(error) };
