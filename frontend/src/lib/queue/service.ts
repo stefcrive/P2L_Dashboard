@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { getSupabaseAdminClient } from '@/lib/supabase/admin';
+import { planQueueDateChanges } from '@/lib/queue/reschedule';
 import {
   addQueueWorkingDays,
   brazilLabHolidayName,
@@ -345,7 +346,7 @@ async function persistSegments(
   status: QueueStatus,
   ignoredSegmentIds: ReadonlySet<string> = new Set(),
   allowOverlap = false,
-  userEditedSegmentId?: string
+  userEditedSegmentIds: ReadonlySet<string> = new Set()
 ) {
   const drafts = normalizeSegmentDrafts(value, allowOverlap);
   await assertInstrumentAvailability(
@@ -386,7 +387,7 @@ async function persistSegments(
       start_at: queueDateAtNineUtc(draft.start).toISOString(),
       end_at: queueDateAtNineUtc(draft.end).toISOString(),
       user_edited:
-        draft.id === userEditedSegmentId
+        draft.id && userEditedSegmentIds.has(draft.id)
           ? true
           : draft.userEdited ??
             (draft.id ? existingById.get(draft.id)?.user_edited : false) ??
@@ -479,87 +480,6 @@ async function renumberFutureSegmentsByDate() {
       .eq('id', future[index].id);
     if (error) throw error;
   }
-}
-
-type FutureCascadePlan = {
-  downstreamSegmentIds: Set<string>;
-};
-
-async function prepareFutureCascade(
-  anchorSegmentId: string,
-  anchorStart: Date,
-  anchorEnd: Date,
-  originalAnchorStart: Date,
-  originalAnchorEnd: Date
-): Promise<FutureCascadePlan> {
-  const items = await loadQueueItems();
-  const activeItemIds = new Set(
-    items
-      .filter((item: any) => activeStatuses.includes(String(item.status)))
-      .map((item: any) => String(item.id))
-  );
-  const runway = items
-    .flatMap((item: any) => (item.segments ?? []) as QueueSegment[])
-    .filter((segment) => activeItemIds.has(segment.queue_item_id))
-    .sort((left, right) => {
-      const runOrder = left.run_position - right.run_position;
-      return runOrder || left.segment_order - right.segment_order;
-    });
-  const anchorIndex = runway.findIndex((segment) => segment.id === anchorSegmentId);
-  if (anchorIndex === -1) {
-    throw new QueueValidationError(
-      'The moved queue run is no longer active. Refresh and try again.'
-    );
-  }
-
-  const today = queueDateAtNineUtc(new Date());
-  if (anchorEnd < anchorStart) {
-    throw new QueueValidationError('The moved queue run cannot end before it starts.');
-  }
-
-  const normalizedAnchorStart = queueDateAtNineUtc(anchorStart);
-  const normalizedOriginalStart = queueDateAtNineUtc(originalAnchorStart);
-  const normalizedOriginalEnd = queueDateAtNineUtc(originalAnchorEnd);
-  if (normalizedAnchorStart <= today) {
-    const activeRunCanResizeEnd =
-      normalizedOriginalStart <= today &&
-      normalizedOriginalEnd >= today &&
-      normalizedAnchorStart.getTime() === normalizedOriginalStart.getTime() &&
-      queueDateAtNineUtc(anchorEnd) >= today;
-    if (!activeRunCanResizeEnd) {
-      throw new QueueValidationError(
-        normalizedOriginalEnd < today
-          ? 'Completed queue runs cannot be changed on the calendar.'
-          : 'A queue run that has started can only resize its end date. Its start date is fixed.'
-      );
-    }
-  }
-
-  const latestPriorEnd = runway.slice(0, anchorIndex).reduce<Date | null>(
-    (latest, segment) => {
-      const end = new Date(segment.end_at);
-      return !latest || end > latest ? end : latest;
-    },
-    null
-  );
-  if (latestPriorEnd && anchorStart <= latestPriorEnd) {
-    throw new QueueValidationError(
-      `This run must start after ${latestPriorEnd.toLocaleDateString('en-GB')}, when the preceding queue work ends.`
-    );
-  }
-  const downstream = runway.slice(anchorIndex + 1);
-  const nonFutureDownstream = downstream.find(
-    (segment) => new Date(segment.start_at) <= today
-  );
-  if (nonFutureDownstream) {
-    throw new QueueValidationError(
-      'A current or past run appears later in the runway. Reorder or plan the queue before moving this run.'
-    );
-  }
-
-  return {
-    downstreamSegmentIds: new Set(downstream.map((segment) => segment.id)),
-  };
 }
 
 function allocateDays(total: number, segments: QueueSegment[]) {
@@ -913,7 +833,15 @@ export async function updateQueueItem(id: string, body: JsonObject) {
     | string
     | null;
   const intendedStatus = (payload.status ?? existing.status) as QueueStatus;
-  const cascadeRequested = body.cascade_future === true && hasSegmentInput;
+  // Date edits from the editor and calendar use the same cascade, including
+  // callers that update the parent estimated dates instead of sending segments.
+  const sameRuns =
+    Array.isArray(segmentInput) &&
+    segmentInput.length === existingSegments.length &&
+    segmentInput.every((segment: any) =>
+      existingSegments.some((existing) => existing.id === segment.id)
+    );
+  const cascadeRequested = sameRuns && body.cascade_future !== false;
   const availabilityDrafts = segmentInput
     ? normalizeSegmentDrafts(segmentInput, cascadeRequested)
     : existingSegments.map((segment) => ({
@@ -925,7 +853,7 @@ export async function updateQueueItem(id: string, body: JsonObject) {
   const originalSegmentsById = new Map(
     existingSegments.map((segment) => [segment.id, segment])
   );
-  const movedFutureDrafts = cascadeRequested
+  const changedDateDrafts = cascadeRequested
     ? availabilityDrafts.filter((draft) => {
         if (!draft.id) return false;
         const original = originalSegmentsById.get(draft.id);
@@ -936,31 +864,30 @@ export async function updateQueueItem(id: string, body: JsonObject) {
         );
       })
     : [];
-  if (cascadeRequested && movedFutureDrafts.length !== 1) {
-    throw new QueueValidationError(
-      'Move one future queue run at a time so later runs can follow it safely.'
-    );
+  let cascadePlan: ReturnType<typeof planQueueDateChanges> | null = null;
+  if (changedDateDrafts.length) {
+    try {
+      const items = await loadQueueItems();
+      cascadePlan = planQueueDateChanges(
+        items.map((item: any) =>
+          item.id === id ? { ...item, status: intendedStatus } : item
+        ),
+        changedDateDrafts.map((draft) => ({
+          id: draft.id!, start: draft.start, end: draft.end,
+        }))
+      );
+    } catch (error) {
+      if (error instanceof Error) throw new QueueValidationError(error.message);
+      throw error;
+    }
   }
-  const movedFutureDraft = movedFutureDrafts[0];
-  const movedOriginal = movedFutureDraft?.id
-    ? originalSegmentsById.get(movedFutureDraft.id)
-    : undefined;
-  const cascadePlan =
-    movedFutureDraft?.id && movedOriginal
-      ? await prepareFutureCascade(
-          movedFutureDraft.id,
-          movedFutureDraft.start,
-          movedFutureDraft.end,
-          new Date(movedOriginal.start_at),
-          new Date(movedOriginal.end_at)
-        )
-      : null;
+  const affectedSegmentIds = new Set(cascadePlan?.map((run) => run.id));
   await assertInstrumentAvailability(
     id,
     intendedAssetId,
     intendedStatus,
     availabilityDrafts,
-    cascadePlan?.downstreamSegmentIds
+    affectedSegmentIds
   );
 
   const { data: saved, error } = Object.keys(payload).length
@@ -985,19 +912,31 @@ export async function updateQueueItem(id: string, body: JsonObject) {
       segmentInput,
       nextAssetId,
       nextStatus,
-      cascadePlan?.downstreamSegmentIds,
+      affectedSegmentIds,
       Boolean(cascadePlan),
-      movedFutureDraft?.id
+      new Set(changedDateDrafts.map((draft) => draft.id!))
     );
     if (cascadePlan) {
-      const planned = await rescheduleFutureSegments();
-      cascadeCount = planned.count;
-      if (planned.syncFailures) {
-        syncWarning = `${planned.syncFailures} later queue item${
-          planned.syncFailures === 1 ? '' : 's'
-        } need lab-book sync.`;
+      const changedIds = new Set(changedDateDrafts.map((draft) => draft.id));
+      const touchedItems = new Set<string>();
+      for (const run of cascadePlan) {
+        const { error: runError } = await (supabase.from('sample_queue_segments') as any)
+          .update({ start_at: run.start.toISOString(), end_at: run.end.toISOString() })
+          .eq('id', run.id);
+        if (runError) throw runError;
+        if (!changedIds.has(run.id)) cascadeCount += 1;
+        touchedItems.add(run.itemId);
       }
-    } else {
+      for (const itemId of Array.from(touchedItems)) {
+        const updated = await updateQueueBounds(itemId);
+        try {
+          await syncLabBook(updated);
+        } catch (syncError) {
+          console.error('Rescheduled queue item could not sync to the lab book:', syncError);
+          syncWarning = 'Queue changes saved, but some lab-book links need to be retried.';
+        }
+      }
+    } else if (!sameRuns) {
       await renumberFutureSegmentsByDate();
     }
   }

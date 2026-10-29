@@ -44,6 +44,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { labBookEntryColorClass } from '@/lib/lab-book/entry-colors';
+import { queueRunDateBlockReason } from '@/lib/queue/reschedule';
 import {
   addQueueWorkingDays,
   brazilLabHolidayName,
@@ -581,16 +582,9 @@ function calendarDragBlockReason(
   mode: CalendarDragMode
 ) {
   if (event.kind !== 'queue') return null;
-  const today = startOfDay(new Date());
-  const eventStart = startOfDay(event.start);
-  const eventEnd = startOfDay(event.end);
-  if (event.status === 'completed' || eventEnd < today) {
-    return 'Completed queue runs cannot be changed on the calendar.';
-  }
-  if (eventStart <= today && mode !== 'resize-end') {
-    return 'A queue run that has started can only resize its end date.';
-  }
-  return null;
+  return queueRunDateBlockReason(
+    event.status, startOfDay(event.start), startOfDay(event.end), mode, startOfDay(new Date())
+  );
 }
 
 function calendarSplitBlockReason(event: CalendarEvent, splitDay: Date) {
@@ -1001,7 +995,7 @@ export function QueueDashboard() {
       }
       setMessage(error.message);
     },
-    onSettled: () => void invalidateSchedule(),
+    onSettled: () => invalidateSchedule(),
   });
 
   const splitCalendarRunMutation = useMutation({
@@ -1629,7 +1623,7 @@ export function QueueDashboard() {
         : previousQueueCalendarWorkingDay(target, true);
       const today = startOfDay(new Date());
       const minimumEnd =
-        interaction.originalStart <= today
+        interaction.event.status === 'analysing' && interaction.originalStart <= today
           ? isQueueCalendarWorkingDay(today)
             ? today
             : calendarDayForQueueDate(
