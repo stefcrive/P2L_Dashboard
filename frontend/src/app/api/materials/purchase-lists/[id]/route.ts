@@ -17,8 +17,9 @@ function getReadableError(error: unknown): string {
 
 export async function PATCH(
   request: Request,
-  { params }: { params: { id: string } }
+  { params: paramsPromise }: { params: Promise<{ id: string }> }
 ) {
+  const params = await paramsPromise;
   try {
     const body = (await request.json().catch(() => null)) as
       | PurchaseListUpdatePayload
@@ -76,8 +77,9 @@ export async function PATCH(
 
 export async function DELETE(
   _request: Request,
-  { params }: { params: { id: string } }
+  { params: paramsPromise }: { params: Promise<{ id: string }> }
 ) {
+  const params = await paramsPromise;
   try {
     const supabase = getSupabaseAdminClient();
     const { error } = await (supabase.from('material_purchase_lists') as any)

@@ -1,26 +1,34 @@
 import type { Metadata } from 'next';
-import { Manrope, Space_Grotesk } from 'next/font/google';
+import { Inter } from 'next/font/google';
 import { GeistMono } from 'geist/font/mono';
+import 'katex/dist/katex.min.css';
 import './globals.css';
 import { Providers } from './providers';
 import { AppShell } from '@/components/layout/app-shell';
 
-const manrope = Manrope({
+const inter = Inter({
   subsets: ['latin'],
   variable: '--font-body',
   display: 'swap',
 });
 
-const spaceGrotesk = Space_Grotesk({
-  subsets: ['latin'],
-  variable: '--font-display',
-  display: 'swap',
-});
 
 export const metadata: Metadata = {
   title: 'P2L Dashboard',
   description:
     'Client, document, materials, and laboratory operations dashboard for P2L',
+  icons: {
+    icon: {
+      url: '/favicon.png',
+      type: 'image/png',
+      sizes: '512x512',
+    },
+    apple: {
+      url: '/favicon.png',
+      type: 'image/png',
+      sizes: '512x512',
+    },
+  },
 };
 
 export default function RootLayout({
@@ -31,16 +39,16 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${manrope.variable} ${spaceGrotesk.variable} ${GeistMono.variable}`}
+        className={`${inter.variable} ${GeistMono.variable}`}
       >
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "try{const t=localStorage.getItem('p2l-theme');const d=t==='dark'||(!t&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.classList.toggle('dark',d)}catch(e){}",
+              "try{const t=localStorage.getItem('p2l-theme');const d=t==='dark';document.documentElement.classList.toggle('dark',d)}catch(e){}",
           }}
         />
         <Providers>
-          <AppShell>{children}</AppShell>
+          <AppShell requireAuth={Boolean(process.env.VERCEL) || process.env.P2L_REQUIRE_AUTH === '1'}>{children}</AppShell>
         </Providers>
       </body>
     </html>

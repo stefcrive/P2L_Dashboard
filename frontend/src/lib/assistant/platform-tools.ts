@@ -14,6 +14,23 @@ import {
   sendGmailMessage,
 } from '@/lib/gmail/client';
 import { resolveClientiRootPath } from '@/lib/client-manager/paths';
+import {
+  createQueueItem,
+  deleteQueueItem,
+  listQueueItems,
+  planActiveQueue,
+  QUEUE_WRITABLE_FIELDS,
+  reorderQueueItems,
+  updateQueueItem,
+} from '@/lib/queue/service';
+import {
+  brazilLabHolidayName,
+  countQueueWorkingDays,
+  isQueueWorkingDay,
+  nextQueueWorkingDay,
+  queueDateAtNineUtc,
+  queueDateKey,
+} from '@/lib/queue/calendar';
 import { getSupabaseAdminClient } from '@/lib/supabase/admin';
 
 type JsonObject = Record<string, unknown>;
@@ -25,6 +42,7 @@ interface EntityConfig {
   writable: string[];
   creatable?: string[];
   orderBy?: string;
+  orderAscending?: boolean;
 }
 
 const ENTITY_CONFIG = {
@@ -437,6 +455,24 @@ const ENTITY_CONFIG = {
     ],
     orderBy: 'occurred_at',
   },
+  queue_item: {
+    table: 'sample_queue_items',
+    label: 'sample queue items',
+    searchable: [
+      'queue_code',
+      'sample_label',
+      'analysis_type',
+      'matrix',
+      'priority',
+      'status',
+      'operator',
+      'notes',
+    ],
+    writable: [...QUEUE_WRITABLE_FIELDS, 'segments'],
+    creatable: QUEUE_WRITABLE_FIELDS,
+    orderBy: 'queue_position',
+    orderAscending: true,
+  },
   backup: {
     table: 'backup_records',
     label: 'backup records',
@@ -491,6 +527,292 @@ function missingTable(error: unknown): boolean {
 
 function compactRows(rows: unknown[] | null, limit = 20): unknown[] {
   return (rows ?? []).slice(0, limit);
+}
+
+const ACTIVE_QUEUE_STATUSES = new Set(['queued', 'analysing']);
+
+function queueDurationDays(sampleCount: unknown, samplesPerWeek: unknown) {
+  const count = Number(sampleCount);
+  const rate = Number(samplesPerWeek);
+  if (!Number.isFinite(count) || !Number.isFinite(rate) || count < 1 || rate <= 0) {
+    return null;
+  }
+  return Math.max(1, Math.ceil((count / rate) * 5));
+}
+
+function optionalQueueDate(value: unknown, label: string) {
+  if (value === undefined || value === null || value === '') return null;
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) throw new Error(`${label} must be a valid date.`);
+  return queueDateAtNineUtc(date);
+}
+
+function queueTemporalState(start: Date, end: Date, today: Date) {
+  if (end < today) return 'past';
+  if (start <= today) return 'current';
+  return 'future';
+}
+
+function queueSearchText(item: any) {
+  return [
+    item.queue_code,
+    item.sample_label,
+    item.analysis_type,
+    item.matrix,
+    item.priority,
+    item.status,
+    item.operator,
+    item.notes,
+    item.client?.name,
+    item.asset?.asset_code,
+    item.asset?.name,
+    ...(item.segments ?? []).flatMap((segment: any) => [
+      segment.id,
+      segment.start_at,
+      segment.end_at,
+    ]),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLocaleLowerCase();
+}
+
+export async function getQueueSchedule(args: JsonObject = {}) {
+  const requestedScope = String(args.scope ?? 'active');
+  if (!['active', 'future', 'all'].includes(requestedScope)) {
+    throw new Error('Queue schedule scope must be active, future, or all.');
+  }
+  const fromDate = optionalQueueDate(args.from_date, 'from_date');
+  const toDate = optionalQueueDate(args.to_date, 'to_date');
+  if (fromDate && toDate && toDate < fromDate) {
+    throw new Error('to_date cannot be before from_date.');
+  }
+
+  const today = queueDateAtNineUtc(new Date());
+  const allItems = await listQueueItems();
+  const selectedItems = allItems.filter((item: any) =>
+    requestedScope === 'all' || ACTIVE_QUEUE_STATUSES.has(String(item.status))
+  );
+  const itemScheduledDays = new Map<string, number>();
+  for (const item of selectedItems) {
+    itemScheduledDays.set(
+      String(item.id),
+      (item.segments ?? []).reduce(
+        (sum: number, segment: any) =>
+          sum +
+          countQueueWorkingDays(
+            new Date(segment.start_at),
+            new Date(segment.end_at)
+          ),
+        0
+      )
+    );
+  }
+
+  const runs = selectedItems
+    .flatMap((item: any) =>
+      (item.segments ?? []).map((segment: any, index: number) => ({
+        item,
+        segment,
+        runNumber: index + 1,
+        runCount: item.segments.length,
+      }))
+    )
+    .filter(({ segment }: any) => {
+      const start = new Date(segment.start_at);
+      const end = new Date(segment.end_at);
+      if (requestedScope === 'future' && start <= today) return false;
+      if (fromDate && end < fromDate) return false;
+      if (toDate && start > toDate) return false;
+      return true;
+    })
+    .sort(
+      (left: any, right: any) =>
+        Number(left.segment.run_position) - Number(right.segment.run_position)
+    );
+
+  const monthly = new Map<
+    string,
+    { scheduled_working_days: number; run_ids: Set<string>; queue_item_ids: Set<string> }
+  >();
+  const runSummaries = runs.map(({ item, segment, runNumber, runCount }: any) => {
+    const start = queueDateAtNineUtc(new Date(segment.start_at));
+    const end = queueDateAtNineUtc(new Date(segment.end_at));
+    const holidays: Array<{ date: string; name: string }> = [];
+    const cursor = new Date(start);
+    let inspectedDays = 0;
+    while (cursor <= end && inspectedDays < 5000) {
+      if (isQueueWorkingDay(cursor)) {
+        const month = queueDateKey(cursor).slice(0, 7);
+        const bucket = monthly.get(month) ?? {
+          scheduled_working_days: 0,
+          run_ids: new Set<string>(),
+          queue_item_ids: new Set<string>(),
+        };
+        bucket.scheduled_working_days += 1;
+        bucket.run_ids.add(String(segment.id));
+        bucket.queue_item_ids.add(String(item.id));
+        monthly.set(month, bucket);
+      } else {
+        const holiday = brazilLabHolidayName(cursor);
+        if (holiday) holidays.push({ date: queueDateKey(cursor), name: holiday });
+      }
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+      inspectedDays += 1;
+    }
+    const expectedWorkingDays = queueDurationDays(
+      item.sample_count,
+      item.samples_per_week
+    );
+    return {
+      run_id: segment.id,
+      queue_item_id: item.id,
+      queue_code: item.queue_code,
+      client_name: item.client?.name ?? null,
+      identifiers: item.sample_label,
+      status: item.status,
+      priority: item.priority,
+      instrument: item.asset
+        ? {
+            id: item.asset.id,
+            code: item.asset.asset_code,
+            name: item.asset.name,
+          }
+        : null,
+      run_position: Number(segment.run_position),
+      run_number: runNumber,
+      run_count: runCount,
+      is_split: runCount > 1,
+      start_at: segment.start_at,
+      end_at: segment.end_at,
+      temporal_state: queueTemporalState(start, end, today),
+      scheduled_working_days: countQueueWorkingDays(start, end),
+      item_expected_working_days: expectedWorkingDays,
+      item_total_scheduled_working_days:
+        itemScheduledDays.get(String(item.id)) ?? 0,
+      sample_count: Number(item.sample_count),
+      samples_per_week: Number(item.samples_per_week),
+      starts_on_working_day: isQueueWorkingDay(start),
+      ends_on_working_day: isQueueWorkingDay(end),
+      holidays_skipped_inside_run: holidays,
+    };
+  });
+
+  const activeRuns = runSummaries.filter((run) =>
+    ACTIVE_QUEUE_STATUSES.has(String(run.status))
+  );
+  const futureRuns = activeRuns.filter((run) => run.temporal_state === 'future');
+  const gaps = futureRuns.slice(1).flatMap((run, index) => {
+    const previous = futureRuns[index];
+    const expected = nextQueueWorkingDay(new Date(previous.end_at));
+    return queueDateAtNineUtc(new Date(run.start_at)).getTime() === expected.getTime()
+      ? []
+      : [
+          {
+            after_run_id: previous.run_id,
+            before_run_id: run.run_id,
+            expected_next_start: expected.toISOString(),
+            actual_start: run.start_at,
+          },
+        ];
+  });
+  const overlaps: Array<{
+    first_run_id: string;
+    second_run_id: string;
+    same_instrument: boolean;
+  }> = [];
+  for (let left = 0; left < activeRuns.length; left += 1) {
+    for (let right = left + 1; right < activeRuns.length; right += 1) {
+      const first = activeRuns[left];
+      const second = activeRuns[right];
+      if (
+        new Date(first.start_at) <= new Date(second.end_at) &&
+        new Date(first.end_at) >= new Date(second.start_at)
+      ) {
+        overlaps.push({
+          first_run_id: first.run_id,
+          second_run_id: second.run_id,
+          same_instrument:
+            Boolean(first.instrument?.id) &&
+            first.instrument?.id === second.instrument?.id,
+        });
+      }
+    }
+  }
+  const durationIssues = selectedItems.flatMap((item: any) => {
+    const expected = queueDurationDays(item.sample_count, item.samples_per_week);
+    const scheduled = itemScheduledDays.get(String(item.id)) ?? 0;
+    return expected !== null && expected !== scheduled
+      ? [
+          {
+            queue_item_id: item.id,
+            identifiers: item.sample_label,
+            expected_working_days: expected,
+            scheduled_working_days: scheduled,
+          },
+        ]
+      : [];
+  });
+  const workingDayIssues = runSummaries
+    .filter((run) => !run.starts_on_working_day || !run.ends_on_working_day)
+    .map((run) => run.run_id);
+  const calendarOrder = [...futureRuns]
+    .sort(
+      (left, right) =>
+        new Date(left.start_at).getTime() - new Date(right.start_at).getTime() ||
+        left.run_position - right.run_position
+    )
+    .map((run) => run.run_id);
+  const runwayOrder = futureRuns.map((run) => run.run_id);
+
+  return {
+    generated_at: new Date().toISOString(),
+    today: queueDateKey(today),
+    scope: requestedScope,
+    planning_rules: {
+      duration_formula:
+        'ceil(sample_count / samples_per_week * 5) working days per queue item',
+      working_week: 'Monday through Friday',
+      excluded_days:
+        'Weekends plus Brazil federal and Sao Paulo laboratory holidays',
+      fixed_runs: 'Runs starting today or earlier are not moved by planning',
+      future_order:
+        'Future active runs follow run_position; split runs share their parent item duration',
+      concurrency:
+        'The planner places future runs in one sequence, so queue runs do not overlap',
+    },
+    summary: {
+      queue_items: selectedItems.length,
+      runs: runSummaries.length,
+      split_queue_items: selectedItems.filter(
+        (item: any) => (item.segments ?? []).length > 1
+      ).length,
+      past_runs: runSummaries.filter((run) => run.temporal_state === 'past').length,
+      current_runs: runSummaries.filter((run) => run.temporal_state === 'current')
+        .length,
+      future_runs: futureRuns.length,
+      first_future_start: futureRuns[0]?.start_at ?? null,
+      last_future_end: futureRuns.at(-1)?.end_at ?? null,
+    },
+    calendar_distribution: Array.from(monthly.entries())
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([month, bucket]) => ({
+        month,
+        scheduled_working_days: bucket.scheduled_working_days,
+        run_count: bucket.run_ids.size,
+        queue_item_count: bucket.queue_item_ids.size,
+      })),
+    validation: {
+      runway_matches_calendar_order:
+        runwayOrder.join('|') === calendarOrder.join('|'),
+      gaps,
+      overlaps,
+      working_day_issue_run_ids: workingDayIssues,
+      duration_issues: durationIssues,
+    },
+    run_order_ids: runSummaries.map((run) => run.run_id).join('|'),
+    runs: runSummaries,
+  };
 }
 
 function sanitizedSearch(value: string): string {
@@ -578,7 +900,22 @@ export async function searchPlatform(args: JsonObject) {
 
   const results = await Promise.all(
     entities.map(async (entity) => {
-      const config = ENTITY_CONFIG[entity];
+      const config: EntityConfig = ENTITY_CONFIG[entity];
+      if (entity === 'queue_item') {
+        const normalizedQuery = query.toLocaleLowerCase();
+        const records = (await listQueueItems())
+          .filter(
+            (item: any) =>
+              !normalizedQuery || queueSearchText(item).includes(normalizedQuery)
+          )
+          .slice(0, perEntityLimit);
+        return {
+          entity,
+          label: config.label,
+          available: true,
+          records,
+        };
+      }
       let request: any = supabase.from(config.table).select('*');
 
       if (query) {
@@ -587,7 +924,10 @@ export async function searchPlatform(args: JsonObject) {
         );
       }
       if (config.orderBy) {
-        request = request.order(config.orderBy, { ascending: false, nullsFirst: false });
+        request = request.order(config.orderBy, {
+          ascending: config.orderAscending ?? false,
+          nullsFirst: false,
+        });
       }
 
       const { data, error } = await request.limit(perEntityLimit);
@@ -619,6 +959,32 @@ export async function getRecordDetails(args: JsonObject) {
   if (!id) throw new Error('A record id is required.');
 
   const config = ENTITY_CONFIG[entity];
+  if (entity === 'queue_item') {
+    const record = (await listQueueItems()).find((item: any) => String(item.id) === id);
+    if (!record) throw new Error('Unable to load queue_item: record not found.');
+    return {
+      entity,
+      record,
+      related: {
+        calendar: {
+          expected_working_days: queueDurationDays(
+            record.sample_count,
+            record.samples_per_week
+          ),
+          scheduled_working_days: (record.segments ?? []).reduce(
+            (sum: number, segment: any) =>
+              sum +
+              countQueueWorkingDays(
+                new Date(segment.start_at),
+                new Date(segment.end_at)
+              ),
+            0
+          ),
+          runs: record.segments ?? [],
+        },
+      },
+    };
+  }
   const supabase = getSupabaseAdminClient();
   const { data, error } = await supabase
     .from(config.table)
@@ -822,6 +1188,18 @@ export async function updatePlatformRecord(args: JsonObject) {
     throw new Error(`No writable ${entity} fields were provided.`);
   }
 
+  if (entity === 'queue_item') {
+    const result = await updateQueueItem(id, fields);
+    return {
+      success: true,
+      action: 'updated',
+      entity,
+      changed_fields: Object.keys(fields),
+      record: result.data,
+      sync_warning: result.syncWarning,
+    };
+  }
+
   const supabase = getSupabaseAdminClient();
   const table = supabase.from(config.table) as any;
   let previousRecord: Record<string, unknown> | null = null;
@@ -889,6 +1267,17 @@ export async function createPlatformRecord(args: JsonObject) {
     throw new Error(`No valid ${entity} fields were provided.`);
   }
 
+  if (entity === 'queue_item') {
+    const result = await createQueueItem(fields);
+    return {
+      success: true,
+      action: 'created',
+      entity,
+      record: result.data,
+      sync_warning: result.syncWarning,
+    };
+  }
+
   if (entity === 'client') {
     const name = String(fields.name ?? '').trim();
     if (!name) throw new Error('A client name is required.');
@@ -940,6 +1329,7 @@ const DELETABLE_ENTITIES = new Set<PlatformEntity>([
   'credit_event',
   'material',
   'lab_entry',
+  'queue_item',
 ]);
 
 export async function deletePlatformRecord(args: JsonObject) {
@@ -951,6 +1341,16 @@ export async function deletePlatformRecord(args: JsonObject) {
   if (!id) throw new Error('A record id is required.');
 
   const config = ENTITY_CONFIG[entity];
+  if (entity === 'queue_item') {
+    const record = await deleteQueueItem(id);
+    return {
+      success: true,
+      action: 'deleted',
+      entity,
+      deleted_record: record,
+      note: 'The linked lab-book schedule and annexed queue files were removed too.',
+    };
+  }
   const supabase = getSupabaseAdminClient();
   const table = supabase.from(config.table) as any;
   const { data: record, error: loadError } = await table
@@ -977,6 +1377,158 @@ export async function deletePlatformRecord(args: JsonObject) {
       entity === 'client' || entity === 'document'
         ? 'The database record was removed; the source file on disk was not deleted.'
         : undefined,
+  };
+}
+
+export async function setQueueItemRuns(args: JsonObject) {
+  const queueItemId = String(args.queue_item_id ?? '').trim();
+  if (!queueItemId) throw new Error('queue_item_id is required.');
+  if (!Array.isArray(args.runs) || !args.runs.length) {
+    throw new Error('runs must contain the complete desired list of one or more runs.');
+  }
+  const result = await updateQueueItem(queueItemId, { segments: args.runs });
+  const schedule = await getQueueSchedule({ scope: 'active' });
+  return {
+    success: true,
+    action: 'queue_runs_replaced',
+    queue_item_id: queueItemId,
+    run_count: Array.isArray(result.data?.segments)
+      ? result.data.segments.length
+      : args.runs.length,
+    record: result.data,
+    sync_warning: result.syncWarning,
+    queue_context: {
+      summary: schedule.summary,
+      calendar_distribution: schedule.calendar_distribution,
+      validation: schedule.validation,
+    },
+    note:
+      'The supplied runs are now the complete run list for this queue item; omitted prior runs were removed.',
+  };
+}
+
+export async function moveQueueRun(args: JsonObject) {
+  const runId = String(args.run_id ?? '').trim();
+  const targetRunId = String(args.target_run_id ?? '').trim();
+  const placement = String(args.placement ?? 'before');
+  if (!runId || !targetRunId) throw new Error('run_id and target_run_id are required.');
+  if (runId === targetRunId) throw new Error('A run cannot be moved relative to itself.');
+  if (!['before', 'after'].includes(placement)) {
+    throw new Error('placement must be before or after.');
+  }
+
+  const ordered = (await listQueueItems())
+    .flatMap((item: any) => item.segments ?? [])
+    .sort(
+      (left: any, right: any) =>
+        Number(left.run_position) - Number(right.run_position)
+    );
+  const sourceIndex = ordered.findIndex((segment: any) => String(segment.id) === runId);
+  if (sourceIndex < 0) throw new Error('The run_id was not found in the runway.');
+  if (!ordered.some((segment: any) => String(segment.id) === targetRunId)) {
+    throw new Error('The target_run_id was not found in the runway.');
+  }
+  const [source] = ordered.splice(sourceIndex, 1);
+  const targetIndex = ordered.findIndex(
+    (segment: any) => String(segment.id) === targetRunId
+  );
+  const insertionIndex = placement === 'after' ? targetIndex + 1 : targetIndex;
+  ordered.splice(insertionIndex, 0, source);
+  await reorderQueueItems(ordered.map((segment: any) => String(segment.id)));
+
+  const calendarReplanned = args.plan_calendar === true;
+  if (calendarReplanned) await planActiveQueue();
+  const schedule = await getQueueSchedule({ scope: 'active' });
+  const movedRun = schedule.runs.find((run: any) => run.run_id === runId);
+  return {
+    success: true,
+    action: 'queue_run_moved',
+    run_id: runId,
+    target_run_id: targetRunId,
+    placement,
+    new_run_position: movedRun?.run_position ?? insertionIndex + 1,
+    calendar_replanned: calendarReplanned,
+    queue_context: {
+      summary: schedule.summary,
+      calendar_distribution: schedule.calendar_distribution,
+      validation: schedule.validation,
+    },
+  };
+}
+
+export async function moveQueueRuns(args: JsonObject) {
+  if (!Array.isArray(args.moves) || !args.moves.length) {
+    throw new Error('moves must contain at least one runway move.');
+  }
+  const moves = args.moves.map((raw, index) => {
+    const move = (raw ?? {}) as JsonObject;
+    const runId = String(move.run_id ?? '').trim();
+    const targetRunId = String(move.target_run_id ?? '').trim();
+    const placement = String(move.placement ?? 'before');
+    if (!runId || !targetRunId) {
+      throw new Error(`Move ${index + 1} requires run_id and target_run_id.`);
+    }
+    if (runId === targetRunId) {
+      throw new Error(`Move ${index + 1} cannot place a run relative to itself.`);
+    }
+    if (!['before', 'after'].includes(placement)) {
+      throw new Error(`Move ${index + 1} placement must be before or after.`);
+    }
+    return { runId, targetRunId, placement };
+  });
+
+  const ordered = (await listQueueItems())
+    .flatMap((item: any) => item.segments ?? [])
+    .sort(
+      (left: any, right: any) =>
+        Number(left.run_position) - Number(right.run_position)
+    );
+  const knownIds = new Set(ordered.map((segment: any) => String(segment.id)));
+  for (const move of moves) {
+    if (!knownIds.has(move.runId)) throw new Error(`Run ${move.runId} was not found.`);
+    if (!knownIds.has(move.targetRunId)) {
+      throw new Error(`Target run ${move.targetRunId} was not found.`);
+    }
+    const sourceIndex = ordered.findIndex(
+      (segment: any) => String(segment.id) === move.runId
+    );
+    const [source] = ordered.splice(sourceIndex, 1);
+    const targetIndex = ordered.findIndex(
+      (segment: any) => String(segment.id) === move.targetRunId
+    );
+    ordered.splice(move.placement === 'after' ? targetIndex + 1 : targetIndex, 0, source);
+  }
+
+  await reorderQueueItems(ordered.map((segment: any) => String(segment.id)));
+  const calendarReplanned = args.plan_calendar === true;
+  if (calendarReplanned) await planActiveQueue();
+  const schedule = await getQueueSchedule({ scope: 'future' });
+  const positions = new Map(
+    schedule.runs.map((run: any) => [String(run.run_id), Number(run.run_position)])
+  );
+  return {
+    success: true,
+    action: 'queue_runs_moved',
+    moves: moves.map((move) => ({
+      run_id: move.runId,
+      target_run_id: move.targetRunId,
+      placement: move.placement,
+      new_run_position: positions.get(move.runId) ?? null,
+    })),
+    calendar_replanned: calendarReplanned,
+    summary: schedule.summary,
+    calendar_distribution: schedule.calendar_distribution,
+    validation: schedule.validation,
+  };
+}
+
+export async function planQueueCalendar() {
+  await planActiveQueue();
+  const schedule = await getQueueSchedule({ scope: 'future' });
+  return {
+    success: true,
+    action: 'future_queue_calendar_planned',
+    ...schedule,
   };
 }
 
@@ -1168,7 +1720,7 @@ export async function getReportData(args: JsonObject) {
   if (kind === 'operations') {
     return searchPlatform({
       query,
-      entities: ['equipment', 'lab_entry', 'backup', 'result'],
+      entities: ['equipment', 'queue_item', 'lab_entry', 'backup', 'result'],
       limit: 20,
     });
   }
@@ -1183,6 +1735,11 @@ export async function executePlatformTool(name: string, args: JsonObject) {
     if (name === 'update_record_fields') return await updatePlatformRecord(args);
     if (name === 'create_record') return await createPlatformRecord(args);
     if (name === 'delete_record') return await deletePlatformRecord(args);
+    if (name === 'get_queue_schedule') return await getQueueSchedule(args);
+    if (name === 'set_queue_item_runs') return await setQueueItemRuns(args);
+    if (name === 'move_queue_run') return await moveQueueRun(args);
+    if (name === 'move_queue_runs') return await moveQueueRuns(args);
+    if (name === 'plan_queue_calendar') return await planQueueCalendar();
     if (name === 'annex_document_to_client') return await annexDocumentToClient(args);
     if (name === 'attach_uploaded_file_to_client') {
       return await attachAssistantUploadToClient(args);

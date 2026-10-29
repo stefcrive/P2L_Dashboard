@@ -1,4 +1,6 @@
 'use client';
+import { postUploadForm } from '@/lib/cloud/upload-client';
+
 
 import Link from 'next/link';
 import {
@@ -16,6 +18,9 @@ import {
   Clock3,
   ExternalLink,
   FilePlus2,
+  Loader2,
+  Mail,
+  Paperclip,
   Pencil,
   Plus,
   Search,
@@ -25,6 +30,7 @@ import {
 } from 'lucide-react';
 
 import {
+  EmptyState,
   PageHeader,
   StatusPill,
   Toolbar,
@@ -86,6 +92,14 @@ interface ClientRecordDraft {
   email: string;
   phone: string;
   taxId: string;
+}
+
+interface ResultEmailDraft {
+  documentId: string;
+  attachmentFileName: string;
+  to: string;
+  subject: string;
+  body: string;
 }
 
 const categoryLabel: Record<DocumentCategory, string> = {
@@ -211,7 +225,7 @@ function CreditEventFormFields({
           id={`${idPrefix}-type`}
           value={draft.eventType}
           onChange={(event) => onChange('eventType', event.target.value)}
-          className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+          className="h-control w-full rounded-md border border-input bg-background px-3 text-sm"
         >
           {Object.entries(creditEventTypeLabel).map(([type, label]) => (
             <option key={type} value={type}>
@@ -242,7 +256,7 @@ function CreditEventFormFields({
           id={`${idPrefix}-equipment`}
           value={draft.equipment}
           onChange={(event) => onChange('equipment', event.target.value)}
-          className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+          className="h-control w-full rounded-md border border-input bg-background px-3 text-sm"
         >
           <option value="">Not specified</option>
           {CREDIT_EVENT_EQUIPMENT_OPTIONS.map((equipment) => (
@@ -413,10 +427,7 @@ async function uploadClientDocument(payload: {
   formData.set('file', payload.file);
   formData.set('category', payload.category);
   if (payload.year) formData.set('year', payload.year);
-  const response = await fetch('/api/client-manager/documents', {
-    method: 'POST',
-    body: formData,
-  });
+  const response = await postUploadForm('/api/client-manager/documents', formData);
   const body = (await response.json().catch(() => null)) as {
     error?: string;
     message?: string;
@@ -425,6 +436,45 @@ async function uploadClientDocument(payload: {
     throw new Error(body?.error ?? 'Unable to store document.');
   }
   return { message: body?.message ?? 'Document stored.' };
+}
+
+async function removeClientDocument(documentId: string) {
+  const response = await fetch(
+    `/api/client-manager/documents/${encodeURIComponent(documentId)}`,
+    { method: 'DELETE' }
+  );
+  const body = (await response.json().catch(() => null)) as {
+    error?: string;
+    message?: string;
+  } | null;
+  if (!response.ok) {
+    throw new Error(body?.error ?? 'Unable to remove the file.');
+  }
+  return { message: body?.message ?? 'File removed.' };
+}
+
+async function fetchResultEmailPreset(
+  documentId: string
+): Promise<Omit<ResultEmailDraft, 'documentId'>> {
+  const response = await fetch(
+    `/api/client-manager/documents/${encodeURIComponent(documentId)}/email-preset`,
+    { cache: 'no-store' }
+  );
+  const body = (await response.json().catch(() => null)) as
+    | (Omit<ResultEmailDraft, 'documentId'> & { error?: string })
+    | null;
+  if (!response.ok || !body) {
+    throw new Error(body?.error ?? 'Unable to prepare the result email.');
+  }
+  return body;
+}
+
+function resultEmailMailto(draft: ResultEmailDraft) {
+  const query = new URLSearchParams({
+    subject: draft.subject,
+    body: draft.body,
+  });
+  return `mailto:${encodeURIComponent(draft.to)}?${query.toString()}`;
 }
 
 function getClientYearRange(client: ClientWithDocuments): string {
@@ -456,6 +506,8 @@ export function ClientManagerDashboard({
   const [clientSort, setClientSort] = useState<ClientSort>('name');
   const clientDialogRef = useRef<HTMLDialogElement>(null);
   const creditEventDialogRef = useRef<HTMLDialogElement>(null);
+  const resultEmailDialogRef = useRef<HTMLDialogElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const [clientDialogOpen, setClientDialogOpen] = useState(false);
   const [creditEventDialogOpen, setCreditEventDialogOpen] = useState(false);
   const [clientDraft, setClientDraft] = useState<ClientRecordDraft>(
@@ -468,8 +520,12 @@ export function ClientManagerDashboard({
   const [editDraft, setEditDraft] = useState<CreditEventDraft | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadCategory, setUploadCategory] =
-    useState<DocumentCategory>('other');
+    useState<DocumentCategory>('analysis');
   const [uploadYear, setUploadYear] = useState(String(new Date().getFullYear()));
+  const [emailDraft, setEmailDraft] = useState<ResultEmailDraft | null>(null);
+  const [emailPresetDocumentId, setEmailPresetDocumentId] = useState<
+    string | null
+  >(null);
   const [documentGroup, setDocumentGroup] = useState<
     'results' | 'administrative'
   >('results');
@@ -522,7 +578,21 @@ export function ClientManagerDashboard({
     onSuccess: async (payload) => {
       setCreditStatus(payload.message);
       setUploadFile(null);
+      if (uploadInputRef.current) uploadInputRef.current.value = '';
       await queryClient.invalidateQueries({ queryKey: ['client-manager'] });
+      await queryClient.invalidateQueries({ queryKey: ['results'] });
+    },
+  });
+
+  const deleteDocumentMutation = useMutation({
+    mutationFn: removeClientDocument,
+    onError: (error: Error) => setCreditStatus(error.message),
+    onSuccess: async (payload) => {
+      setCreditStatus(payload.message);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['client-manager'] }),
+        queryClient.invalidateQueries({ queryKey: ['results'] }),
+      ]);
     },
   });
 
@@ -558,6 +628,7 @@ export function ClientManagerDashboard({
   }, [clientSort, data?.clients]);
 
   useEffect(() => {
+    if (!data) return;
     if (clients.length === 0) {
       setSelectedClientId(null);
       return;
@@ -565,7 +636,7 @@ export function ClientManagerDashboard({
     if (!clients.some((client) => client.id === selectedClientId)) {
       setSelectedClientId(clients[0].id);
     }
-  }, [clients, selectedClientId]);
+  }, [clients, selectedClientId, data]);
 
   useEffect(() => {
     const dialog = clientDialogRef.current;
@@ -586,6 +657,16 @@ export function ClientManagerDashboard({
       dialog.close();
     }
   }, [creditEventDialogOpen]);
+
+  useEffect(() => {
+    const dialog = resultEmailDialogRef.current;
+    if (!dialog) return;
+    if (emailDraft && !dialog.open) {
+      dialog.showModal();
+    } else if (!emailDraft && dialog.open) {
+      dialog.close();
+    }
+  }, [emailDraft]);
 
   const selectedClient = useMemo(
     () => clients.find((client) => client.id === selectedClientId) ?? null,
@@ -712,8 +793,38 @@ export function ClientManagerDashboard({
     });
   }
 
+  function selectDocumentGroup(group: 'results' | 'administrative') {
+    setDocumentGroup(group);
+    setUploadFile(null);
+    if (uploadInputRef.current) uploadInputRef.current.value = '';
+    setUploadCategory(group === 'results' ? 'analysis' : 'other');
+  }
+
+  function deleteDocument(document: (typeof documentsToDisplay)[number]) {
+    const kind = document.category === 'analysis' ? 'result file' : 'document';
+    if (!window.confirm(`Remove the uploaded ${kind} “${document.file_name}”?`)) {
+      return;
+    }
+    deleteDocumentMutation.mutate(document.id);
+  }
+
+  async function openResultEmail(documentId: string) {
+    setEmailPresetDocumentId(documentId);
+    setCreditStatus('');
+    try {
+      const preset = await fetchResultEmailPreset(documentId);
+      setEmailDraft({ documentId, ...preset });
+    } catch (error) {
+      setCreditStatus(
+        error instanceof Error ? error.message : 'Unable to prepare the email.'
+      );
+    } finally {
+      setEmailPresetDocumentId(null);
+    }
+  }
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <nav
         aria-label="Breadcrumb"
         className="flex items-center gap-1.5 text-xs text-muted-foreground"
@@ -733,16 +844,15 @@ export function ClientManagerDashboard({
       <PageHeader
         eyebrow="Client work"
         title="Clients"
-        description="Manage client records, indexed documents, and the credit ledger used for laboratory analyses."
         actions={
           <StatusPill
             tone={
-              data?.source === 'local' || data?.source === 'supabase'
+              data?.source === 'local' || data?.source === 'supabase' || data?.source === 'neon'
                 ? 'success'
                 : 'warning'
             }
           >
-            {data?.source === 'local'
+            {data?.source === 'neon' ? 'Connected' : data?.source === 'local'
               ? 'Embedded PostgreSQL'
               : data?.source === 'supabase'
                 ? 'Supabase'
@@ -770,9 +880,9 @@ export function ClientManagerDashboard({
       ) : null}
 
       <Toolbar>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
           <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               value={filters.search}
               onChange={(event) =>
@@ -787,7 +897,7 @@ export function ClientManagerDashboard({
             onChange={(event) =>
               setFilters((prev) => ({ ...prev, year: event.target.value }))
             }
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            className="h-control rounded-md border border-input bg-background px-3 text-sm"
           >
             <option value="all">All years</option>
             {(data?.availableYears ?? []).map((year) => (
@@ -804,7 +914,7 @@ export function ClientManagerDashboard({
                 category: event.target.value as FiltersState['category'],
               }))
             }
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            className="h-control rounded-md border border-input bg-background px-3 text-sm"
           >
             <option value="all">All categories</option>
             {(data?.availableCategories ?? []).map((category) => (
@@ -824,11 +934,11 @@ export function ClientManagerDashboard({
         </Card>
       ) : null}
 
-      <section className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-        <Card className="lg:col-span-4">
-          <CardHeader className="gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <section className="grid grid-cols-1 items-start gap-workspace lg:grid-cols-[minmax(300px,0.65fr)_minmax(0,2fr)]">
+        <Card>
+          <CardHeader className="gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
             <div className="flex items-center justify-between gap-2">
-              <CardTitle className="text-lg">Clients</CardTitle>
+              <CardTitle>Clients</CardTitle>
               <Button
                 size="sm"
                 variant="outline"
@@ -867,12 +977,17 @@ export function ClientManagerDashboard({
               </Button>
             </div>
           </CardHeader>
-          <CardContent className="max-h-[760px] space-y-2 overflow-y-auto">
+          <CardContent className="max-h-[calc(100dvh-260px)] space-y-1 overflow-y-auto">
+            {clientManagerQuery.isPending ? (
+              <EmptyState title="Loading clients" description="Retrieving client records and documents." />
+            ) : !clients.length ? (
+              <EmptyState title="No matching clients" description="Change the search or filters, or add a client." />
+            ) : null}
             {clients.map((client) => (
               <div
                 key={client.id}
                 className={cn(
-                  'flex items-start gap-1 rounded-lg border p-1 transition-colors',
+                  'flex items-center gap-1 rounded-lg border p-1 transition-colors',
                   selectedClientId === client.id
                     ? 'border-primary bg-primary/5'
                     : 'border-border hover:bg-muted/40'
@@ -881,30 +996,31 @@ export function ClientManagerDashboard({
                 <button
                   type="button"
                   onClick={() => setSelectedClientId(client.id)}
-                  className="min-w-0 flex-1 rounded-md p-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="min-w-0 flex-1 rounded-md px-2 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="font-medium leading-tight">{client.name}</p>
-                    <div className="flex shrink-0 items-center gap-1">
-                      {client.current_credit_balance !== null &&
-                      client.current_credit_balance > 0 ? (
-                        <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
-                          Credit available
-                        </Badge>
-                      ) : null}
-                      <Badge variant="outline">{client.total_documents}</Badge>
-                    </div>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <p className="min-w-0 flex-1 truncate text-sm font-medium leading-5" title={client.name}>
+                      {client.name}
+                    </p>
+                    {client.current_credit_balance !== null &&
+                    client.current_credit_balance > 0 ? (
+                      <Badge className="h-5 shrink-0 border-emerald-300 bg-emerald-50 px-1.5 text-[9px] text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+                        Credit
+                      </Badge>
+                    ) : null}
                   </div>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    Years: {getClientYearRange(client)}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Balance: {formatCurrency(client.current_credit_balance)}
+                  <p
+                    className="mt-0.5 truncate font-mono text-[11px] leading-4 text-muted-foreground tabular-nums"
+                    title={`Years ${getClientYearRange(client)} · ${client.administrative_documents_count} documents · ${client.result_files_count} results · ${formatCurrency(client.current_credit_balance)} credit`}
+                  >
+                    {getClientYearRange(client)} · Docs {client.administrative_documents_count} · Results{' '}
+                    {client.result_files_count} · Credit {formatCurrency(client.current_credit_balance)}
                   </p>
                 </button>
                 <Button
                   size="icon"
                   variant="ghost"
+                  className="h-8 w-8 shrink-0"
                   onClick={() => openClientRecord(client)}
                   aria-label={`Edit ${client.name}`}
                   title={`Edit ${client.name}`}
@@ -916,10 +1032,10 @@ export function ClientManagerDashboard({
           </CardContent>
         </Card>
 
-        <div className="space-y-4 lg:col-span-8">
+        <div className="min-w-0 space-y-workspace">
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">
+              <CardTitle>
                 Credit Ledger {selectedClient ? `- ${selectedClient.name}` : ''}
               </CardTitle>
             </CardHeader>
@@ -1108,7 +1224,7 @@ export function ClientManagerDashboard({
           <Card>
             <CardHeader className="gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <CardTitle className="text-lg">
+                <CardTitle>
                   Documents {selectedClient ? `— ${selectedClient.name}` : ''}
                 </CardTitle>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -1126,7 +1242,7 @@ export function ClientManagerDashboard({
                     size="sm"
                     variant={documentGroup === 'results' ? 'secondary' : 'ghost'}
                     className="h-7 px-2 text-[11px]"
-                    onClick={() => setDocumentGroup('results')}
+                    onClick={() => selectDocumentGroup('results')}
                   >
                     Results {resultDocuments.length}
                   </Button>
@@ -1136,7 +1252,7 @@ export function ClientManagerDashboard({
                       documentGroup === 'administrative' ? 'secondary' : 'ghost'
                     }
                     className="h-7 px-2 text-[11px]"
-                    onClick={() => setDocumentGroup('administrative')}
+                    onClick={() => selectDocumentGroup('administrative')}
                   >
                     Administrative {administrativeDocuments.length}
                   </Button>
@@ -1154,30 +1270,56 @@ export function ClientManagerDashboard({
                     Add invoice
                   </Button>
                 )}
+                {selectedClient ? (
+                  <Button size="sm" variant="outline" asChild>
+                    <Link href={`/clients/${selectedClient.id}/quotations/new`}>
+                      <FilePlus2 className="mr-1.5 h-3.5 w-3.5" />
+                      Cotação de serviço
+                    </Link>
+                  </Button>
+                ) : (
+                  <Button size="sm" variant="outline" disabled>
+                    <FilePlus2 className="mr-1.5 h-3.5 w-3.5" />
+                    Cotação de serviço
+                  </Button>
+                )}
               </div>
             </CardHeader>
             <CardContent className="p-0">
-              <div className="grid gap-2 border-b bg-slate-50/70 p-3 dark:bg-slate-900/40 sm:grid-cols-[minmax(0,1fr)_130px_100px_auto]">
+              <div
+                className={cn(
+                  'grid gap-2 border-b bg-slate-50/70 p-3 dark:bg-slate-900/40',
+                  documentGroup === 'results'
+                    ? 'sm:grid-cols-[minmax(0,1fr)_100px_auto]'
+                    : 'sm:grid-cols-[minmax(0,1fr)_130px_100px_auto]'
+                )}
+              >
                 <Input
+                  ref={uploadInputRef}
                   type="file"
+                  accept={documentGroup === 'results' ? '.xlsx,.xls' : undefined}
                   onChange={(event) =>
                     setUploadFile(event.target.files?.[0] ?? null)
                   }
                   className="bg-background"
                 />
-                <select
-                  value={uploadCategory}
-                  onChange={(event) =>
-                    setUploadCategory(event.target.value as DocumentCategory)
-                  }
-                  className="h-9 rounded-md border border-input bg-background px-2 text-xs"
-                >
-                  {Object.entries(categoryLabel).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
+                {documentGroup === 'administrative' ? (
+                  <select
+                    value={uploadCategory}
+                    onChange={(event) =>
+                      setUploadCategory(event.target.value as DocumentCategory)
+                    }
+                    className="h-control rounded-md border border-input bg-background px-2 text-xs"
+                  >
+                    {Object.entries(categoryLabel)
+                      .filter(([value]) => value !== 'analysis')
+                      .map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                  </select>
+                ) : null}
                 <Input
                   type="number"
                   value={uploadYear}
@@ -1190,7 +1332,13 @@ export function ClientManagerDashboard({
                   disabled={!selectedClient || !uploadFile || uploadMutation.isPending}
                 >
                   <Upload className="mr-1.5 h-3.5 w-3.5" />
-                  Store
+                  {uploadMutation.isPending
+                    ? documentGroup === 'results'
+                      ? 'Importing…'
+                      : 'Adding…'
+                    : documentGroup === 'results'
+                      ? 'Add result'
+                      : 'Add document'}
                 </Button>
               </div>
               <div className="max-h-[320px] overflow-y-auto">
@@ -1243,17 +1391,58 @@ export function ClientManagerDashboard({
                           {formatDate(document.inferred_document_date)}
                         </TableCell>
                         <TableCell className="text-right">
-                          {document.category === 'analysis' ? (
+                          <div className="flex justify-end gap-1">
                             <Button size="sm" variant="outline" asChild>
                               <a
-                                href={`/results?sourceDocumentId=${encodeURIComponent(document.id)}`}
-                                aria-label={`Visualize ${document.file_name} in Results`}
+                                href={`/api/client-manager/documents/${document.id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label={`Open ${document.file_name}`}
                               >
-                                <BarChart3 className="mr-1.5 h-3.5 w-3.5" />
-                                Visualize
+                                <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                                Open
                               </a>
                             </Button>
-                          ) : null}
+                            {document.category === 'analysis' ? (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => openResultEmail(document.id)}
+                                  disabled={emailPresetDocumentId === document.id}
+                                  aria-label={`Prepare email for ${document.file_name}`}
+                                >
+                                  {emailPresetDocumentId === document.id ? (
+                                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                                  ) : (
+                                    <Mail className="mr-1.5 h-3.5 w-3.5" />
+                                  )}
+                                  Email
+                                </Button>
+                                <Button size="sm" variant="outline" asChild>
+                                  <a
+                                    href={`/results?sourceDocumentId=${encodeURIComponent(document.id)}`}
+                                    aria-label={`Visualize ${document.file_name} in Results`}
+                                  >
+                                    <BarChart3 className="mr-1.5 h-3.5 w-3.5" />
+                                    Visualize
+                                  </a>
+                                </Button>
+                              </>
+                            ) : null}
+                            {document.storage_origin === 'upload' ? (
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                onClick={() => deleteDocument(document)}
+                                disabled={deleteDocumentMutation.isPending}
+                                aria-label={`Remove ${document.file_name}`}
+                                title="Remove uploaded file"
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                              </Button>
+                            ) : null}
+                          </div>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -1264,6 +1453,113 @@ export function ClientManagerDashboard({
           </Card>
         </div>
       </section>
+
+      <dialog
+        ref={resultEmailDialogRef}
+        onCancel={(event) => {
+          event.preventDefault();
+          setEmailDraft(null);
+        }}
+        aria-labelledby="result-email-title"
+        className="w-[calc(100%-1.5rem)] max-w-3xl rounded-lg border bg-card p-0 text-card-foreground shadow-xl backdrop:bg-slate-950/45 dark:backdrop:bg-slate-950/70"
+      >
+        {emailDraft ? (
+          <form method="dialog" onSubmit={(event) => event.preventDefault()}>
+            <div className="flex items-start justify-between gap-4 border-b px-5 py-4">
+              <div>
+                <h2 id="result-email-title" className="text-lg font-semibold">
+                  Result email
+                </h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Prepared from the identifiers, sample types, and precision data in
+                  this result file.
+                </p>
+              </div>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                onClick={() => setEmailDraft(null)}
+                aria-label="Close result email"
+                title="Close"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="space-y-4 px-5 py-4">
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
+                <label className="space-y-1">
+                  <span className="text-[11px] font-medium text-muted-foreground">
+                    To
+                  </span>
+                  <Input
+                    type="email"
+                    value={emailDraft.to}
+                    placeholder="client@example.com"
+                    onChange={(event) =>
+                      setEmailDraft((previous) =>
+                        previous ? { ...previous, to: event.target.value } : previous
+                      )
+                    }
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[11px] font-medium text-muted-foreground">
+                    Subject
+                  </span>
+                  <Input
+                    value={emailDraft.subject}
+                    onChange={(event) =>
+                      setEmailDraft((previous) =>
+                        previous
+                          ? { ...previous, subject: event.target.value }
+                          : previous
+                      )
+                    }
+                  />
+                </label>
+              </div>
+              <label className="block space-y-1">
+                <span className="text-[11px] font-medium text-muted-foreground">
+                  Message
+                </span>
+                <textarea
+                  value={emailDraft.body}
+                  onChange={(event) =>
+                    setEmailDraft((previous) =>
+                      previous ? { ...previous, body: event.target.value } : previous
+                    )
+                  }
+                  rows={13}
+                  className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm leading-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                />
+              </label>
+              <div className="flex items-center gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200">
+                <Paperclip className="h-3.5 w-3.5 shrink-0" />
+                Attach {emailDraft.attachmentFileName} in your email app before
+                sending.
+              </div>
+            </div>
+
+            <div className="flex flex-wrap justify-end gap-2 border-t px-5 py-4">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setEmailDraft(null)}
+              >
+                Cancel
+              </Button>
+              <Button type="button" asChild>
+                <a href={resultEmailMailto(emailDraft)}>
+                  <Mail className="mr-1.5 h-3.5 w-3.5" />
+                  Open email app
+                </a>
+              </Button>
+            </div>
+          </form>
+        ) : null}
+      </dialog>
 
       <dialog
         ref={creditEventDialogRef}
@@ -1362,7 +1658,7 @@ export function ClientManagerDashboard({
             </Button>
           </div>
 
-          <div className="grid gap-4 px-5 py-4 sm:grid-cols-2">
+          <div className="grid gap-workspace px-5 py-4 sm:grid-cols-2">
             <label className="space-y-1 sm:col-span-2">
               <span className="text-xs font-medium">Client name</span>
               <Input

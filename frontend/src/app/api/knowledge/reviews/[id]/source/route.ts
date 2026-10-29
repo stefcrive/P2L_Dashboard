@@ -9,10 +9,10 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(
   _request: Request,
-  context: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const source = await getReviewSource(Number(context.params.id));
+    const source = await getReviewSource(Number((await context.params).id));
     if (!source) {
       return NextResponse.json(
         { error: 'Review source not found.' },

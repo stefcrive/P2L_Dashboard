@@ -9,6 +9,7 @@ import { getWorkspaceEnvironmentValue } from '@/lib/knowledge/config';
 
 import { LOCAL_APP_SCHEMA_SQL, LOCAL_APP_SCHEMA_VERSION } from './schema';
 import { seedLabBookHistory } from '@/lib/lab-book/history';
+import { cloudEnabled, getCloudDatabase } from '@/lib/cloud/database';
 
 function findRepositoryRoot() {
   const candidates = [process.cwd(), path.resolve(process.cwd(), '..')];
@@ -74,6 +75,7 @@ declare global {
 }
 
 export function getLocalAppDatabase() {
+  if (cloudEnabled()) return Promise.resolve(getCloudDatabase());
   if (!globalThis.__localAppDatabase) {
     globalThis.__localAppDatabase = createLocalAppDatabase().then(
       (database) => {
@@ -119,6 +121,7 @@ export function getLocalAppDatabase() {
 }
 
 export function getLocalAppDatabaseInfo() {
+  if (cloudEnabled()) return { engine: 'Neon PostgreSQL', path: '', migrationTarget: 'Neon PostgreSQL' };
   return {
     engine: 'PGlite / PostgreSQL',
     path: getLocalAppDatabasePath(),

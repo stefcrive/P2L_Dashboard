@@ -58,12 +58,8 @@ Merged_text_files/
 Raw ISOGEOCHEM data/
 cleanup_audit/
 LLM_processing/
-Results/
-!frontend/src/app/api/results/
-frontend/src/app/api/results/*
-!frontend/src/app/api/results/data/
-frontend/src/app/api/results/data/*
-!frontend/src/app/api/results/data/route.ts
+# Ignore laboratory workbooks at the repository root, not Results source routes.
+/Results/
 
 # Optional npm cache directory
 .npm
@@ -75,6 +71,8 @@ frontend/src/app/api/results/data/*
 .tmp/
 temp/
 tmp/
+/outputs/vercel-deploy/
+/outputs/vercel-migration/
 
 # FastAPI specific
 .pytest_cache/
@@ -87,3 +85,14 @@ data/temp/
 *.dat
 *.txt
 !**/example.txt
+
+/outputs/newbackup-migration/
+
+# Generated Next.js output and local verification artifacts
+.next*/
+*.tsbuildinfo
+next-env.d.ts
+.vercel/
+/outputs/branding-verification/
+/outputs/legend-card-verified.png
+/outputs/legend-chart-verified.png

@@ -144,6 +144,8 @@ export interface ClientWithDocuments extends ClientRow {
   documents: ClientDocumentRow[];
   credit_events: ClientCreditEventRow[];
   current_credit_balance: number | null;
+  result_files_count: number;
+  administrative_documents_count: number;
 }
 
 export interface ClientManagerStats {
@@ -159,7 +161,7 @@ export interface ClientManagerStats {
 }
 
 export interface ClientManagerDataResponse {
-  source: 'local' | 'supabase' | 'filesystem';
+  source: 'local' | 'supabase' | 'neon' | 'filesystem';
   warnings: string[];
   availableYears: number[];
   availableCategories: DocumentCategory[];

@@ -124,7 +124,7 @@ export interface MaterialsCatalogStats {
 }
 
 export interface MaterialsCatalogDataResponse {
-  source: 'local' | 'supabase' | 'filesystem';
+  source: 'local' | 'supabase' | 'neon' | 'filesystem';
   warnings: string[];
   availableTypes: MaterialType[];
   availableEquipment: string[];

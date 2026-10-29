@@ -165,7 +165,7 @@ function buildPurchaseLists(
 }
 
 function buildResponse(
-  source: 'local' | 'supabase' | 'filesystem',
+  source: 'local' | 'supabase' | 'neon' | 'filesystem',
   warnings: string[],
   allMaterials: MaterialInventoryRow[],
   purchaseLists: MaterialPurchaseListWithItems[],
@@ -246,6 +246,7 @@ async function triggerAutomaticSync(
       cache: 'no-store',
       headers: {
         'x-p2l-auto-sync': '1',
+        cookie: request.headers.get('cookie') ?? '',
       },
     });
 
@@ -266,7 +267,7 @@ function inferMinimumForFilesystemRow(
   materialType: MaterialType,
   suggestedStock: number | null
 ): number | null {
-  if (materialType !== 'consumable') {
+  if (materialType !== 'consumable' && materialType !== 'spare_part') {
     return null;
   }
   if (suggestedStock === null) {
@@ -357,7 +358,7 @@ export async function GET(request: Request) {
       );
     }
 
-    if (materialsData.length === 0) {
+    if (materialsData.length === 0 && getApplicationDatabaseSource() !== 'neon') {
       const syncWarning = await triggerAutomaticSync(request, '/api/materials/sync');
       if (syncWarning) {
         warnings.push(`Automatic startup sync failed: ${syncWarning}`);

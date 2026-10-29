@@ -6,6 +6,7 @@ export const resourceNames = [
   'results',
   'invoices',
   'assets',
+  'equipment-components',
   'lab-book',
   'backups',
 ] as const;
@@ -98,7 +99,7 @@ export const resourceConfigs: Record<ResourceName, ResourceConfig> = {
   assets: {
     table: 'equipment_assets',
     select:
-      'id, asset_code, name, manufacturer, model, serial_number, location, status, provider_id, last_service_at, next_service_at, notes, created_at, updated_at, provider:providers(id, name)',
+      'id, asset_code, name, manufacturer, model, serial_number, location, status, provider_id, last_service_at, next_service_at, maintenance_interval_months, notes, created_at, updated_at, provider:providers(id, name)',
     orderColumn: 'name',
     ascending: true,
     required: ['asset_code', 'name'],
@@ -113,6 +114,24 @@ export const resourceConfigs: Record<ResourceName, ResourceConfig> = {
       'provider_id',
       'last_service_at',
       'next_service_at',
+      'maintenance_interval_months',
+      'notes',
+    ],
+  },
+  'equipment-components': {
+    table: 'equipment_components',
+    select:
+      'id, asset_id, name, sort_order, maintenance_interval_months, last_maintenance_at, next_maintenance_at, notes, created_at, updated_at, asset:equipment_assets(id, asset_code, name)',
+    orderColumn: 'sort_order',
+    ascending: true,
+    required: ['asset_id', 'name'],
+    writable: [
+      'asset_id',
+      'name',
+      'sort_order',
+      'maintenance_interval_months',
+      'last_maintenance_at',
+      'next_maintenance_at',
       'notes',
     ],
   },

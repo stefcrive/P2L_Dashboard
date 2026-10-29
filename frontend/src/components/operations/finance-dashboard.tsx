@@ -1,6 +1,11 @@
 'use client';
 
 import Link from 'next/link';
+import {
+  quotationServiceDescription,
+  quotationDeliveryNote,
+  quotationUnitPrice,
+} from '@/lib/invoices/quotation';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -82,15 +87,15 @@ const expirationDate = new Date(Date.now() + 30 * 86_400_000)
   .toISOString()
   .slice(0, 10);
 
-function createItem(): InvoiceItemDraft {
+function createItem(quotation = false): InvoiceItemDraft {
   return {
     id:
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random()}`,
-    description: '',
+    description: quotation ? quotationServiceDescription : '',
     quantity: '1',
-    unitPrice: '',
+    unitPrice: quotation ? String(quotationUnitPrice) : '',
   };
 }
 
@@ -116,11 +121,13 @@ const initialDraft = {
   footerNote: fallbackInvoiceSettings.footer_note,
 };
 
-function draftWithSettings(settings: InvoiceSettings) {
+function draftWithSettings(settings: InvoiceSettings, quotation = false) {
   return {
     ...initialDraft,
-    language: settings.default_language,
-    currency: settings.default_currency,
+    language: quotation ? ('pt' as const) : settings.default_language,
+    currency: quotation ? 'BRL' : settings.default_currency,
+    dueDate: quotation ? '' : initialDraft.dueDate,
+    additionalInfo: quotation ? quotationDeliveryNote : '',
     issuerDetails: settings.issuer_details,
     paymentInstructions: settings.default_payment_instructions,
     nationalPaymentDetails: settings.national_payment_details,
@@ -129,9 +136,9 @@ function draftWithSettings(settings: InvoiceSettings) {
   };
 }
 
-function formatMoney(value: number, currency: string) {
+function formatMoney(value: number, currency: string, language = 'en') {
   try {
-    return new Intl.NumberFormat('en-GB', {
+    return new Intl.NumberFormat(language === 'pt' ? 'pt-BR' : 'en-GB', {
       style: 'currency',
       currency,
     }).format(Number(value));
@@ -147,17 +154,22 @@ function invoiceTone(status: Invoice['status']) {
   return 'warning' as const;
 }
 
-function generatedInvoiceNumber(issueDate: string, mode: 'preview' | 'issue') {
-  if (mode === 'preview') return 'DRAFT-PREVIEW';
+function generatedInvoiceNumber(
+  issueDate: string,
+  mode: 'preview' | 'issue',
+  quotation = false
+) {
+  if (mode === 'preview') return quotation ? 'COT-PREVIEW' : 'DRAFT-PREVIEW';
   const datePart =
     issueDate.replace(/\D/g, '').slice(0, 8) ||
     new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  return `INV-${datePart}-${Date.now().toString(36).slice(-4).toUpperCase()}`;
+  return `${quotation ? 'COT' : 'INV'}-${datePart}-${Date.now().toString(36).slice(-4).toUpperCase()}`;
 }
 
 function validateInvoiceDraft(
   draft: typeof initialDraft,
-  items: InvoiceItemDraft[]
+  items: InvoiceItemDraft[],
+  quotation = false
 ) {
   const missing: Array<{ label: string; fieldId: string }> = [];
   if (!draft.clientName.trim()) {
@@ -166,7 +178,7 @@ function validateInvoiceDraft(
   if (!draft.issueDate) {
     missing.push({ label: 'emission date', fieldId: 'invoice-issue-date' });
   }
-  if (!draft.dueDate) {
+  if (!quotation && !draft.dueDate) {
     missing.push({ label: 'expiration date', fieldId: 'invoice-due-date' });
   }
   if (!/^[A-Z]{3}$/.test(draft.currency.trim().toUpperCase())) {
@@ -186,7 +198,7 @@ function validateInvoiceDraft(
     )
   ) {
     missing.push({
-      label: 'at least one complete invoice item',
+      label: 'at least one complete service item',
       fieldId: 'invoice-item-0-description',
     });
   }
@@ -241,7 +253,7 @@ async function fetchInvoiceSettings(): Promise<InvoiceSettings> {
   return payload.data;
 }
 
-export type FinanceDashboardView = 'ledger' | 'create';
+export type FinanceDashboardView = 'ledger' | 'create' | 'quotation';
 
 function FinanceBreadcrumb({
   view,
@@ -264,7 +276,7 @@ function FinanceBreadcrumb({
         Overview
       </Link>
       <span aria-hidden="true">/</span>
-      {view === 'create' ? (
+      {view !== 'ledger' ? (
         <>
           <Link
             href="/clients"
@@ -284,7 +296,7 @@ function FinanceBreadcrumb({
           </Link>
           <span aria-hidden="true">/</span>
           <span aria-current="page" className="font-medium text-foreground">
-            Add invoice
+            {view === 'quotation' ? 'Cotação de serviço' : 'Add invoice'}
           </span>
         </>
       ) : (
@@ -303,13 +315,21 @@ export function FinanceDashboard({
   view?: FinanceDashboardView;
   clientId?: string;
 }) {
-  const isCreateView = view === 'create';
+  const isQuotation = view === 'quotation';
+  const isCreateView = view !== 'ledger';
+  const documentName = isQuotation ? 'Quotation' : 'Invoice';
   const queryClient = useQueryClient();
   const settingsApplied = useRef(false);
   const clientApplied = useRef(false);
   const [search, setSearch] = useState('');
-  const [draft, setDraft] = useState(initialDraft);
-  const [items, setItems] = useState<InvoiceItemDraft[]>([createItem()]);
+  const [draft, setDraft] = useState(() =>
+    isQuotation
+      ? draftWithSettings(fallbackInvoiceSettings, true)
+      : initialDraft
+  );
+  const [items, setItems] = useState<InvoiceItemDraft[]>(() => [
+    createItem(isQuotation),
+  ]);
   const [message, setMessage] = useState('');
   const [messageIsError, setMessageIsError] = useState(false);
   const [pdfBusy, setPdfBusy] = useState<'preview' | 'issue' | null>(null);
@@ -336,8 +356,12 @@ export function FinanceDashboard({
     settingsApplied.current = true;
     setDraft((current) => ({
       ...current,
-      language: settingsQuery.data.default_language,
-      currency: settingsQuery.data.default_currency,
+      language: isQuotation
+        ? current.language
+        : settingsQuery.data.default_language,
+      currency: isQuotation
+        ? current.currency
+        : settingsQuery.data.default_currency,
       issuerDetails: settingsQuery.data.issuer_details,
       paymentInstructions: settingsQuery.data.default_payment_instructions,
       nationalPaymentDetails: settingsQuery.data.national_payment_details,
@@ -345,7 +369,7 @@ export function FinanceDashboard({
         settingsQuery.data.international_payment_details,
       footerNote: settingsQuery.data.footer_note,
     }));
-  }, [settingsQuery.data]);
+  }, [settingsQuery.data, isQuotation]);
 
   const saveClientMutation = useMutation({
     mutationFn: async () =>
@@ -492,11 +516,11 @@ export function FinanceDashboard({
       clientTaxId: draft.clientTaxId,
       invoiceNumber:
         draft.invoiceNumber.trim() ||
-        generatedInvoiceNumber(draft.issueDate, mode),
+        generatedInvoiceNumber(draft.issueDate, mode, isQuotation),
       language: draft.language,
       currency: draft.currency,
       issueDate: draft.issueDate,
-      dueDate: draft.dueDate,
+      dueDate: isQuotation ? '' : draft.dueDate,
       taxPercent: Number(draft.taxPercent || 0),
       items: items.map((item) => ({
         description: item.description,
@@ -514,7 +538,7 @@ export function FinanceDashboard({
   }
 
   async function createPdf(mode: 'preview' | 'issue') {
-    const validationProblems = validateInvoiceDraft(draft, items);
+    const validationProblems = validateInvoiceDraft(draft, items, isQuotation);
     if (validationProblems.length) {
       setMessage(
         `Complete the required fields: ${validationProblems
@@ -538,7 +562,7 @@ export function FinanceDashboard({
       previewWindow.opener = null;
       showPreviewWindowState(
         previewWindow,
-        'Preparing invoice preview',
+        `Preparing ${documentName.toLowerCase()} preview`,
         'The PDF is being generated. This tab will update automatically.'
       );
     }
@@ -546,14 +570,20 @@ export function FinanceDashboard({
     setMessage('');
     setMessageIsError(false);
     try {
-      const response = await fetch('/api/invoices/pdf', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPdfPayload(mode)),
-      });
+      const pdfPayload = buildPdfPayload(mode);
+      const response = await fetch(
+        isQuotation ? '/api/quotations/pdf' : '/api/invoices/pdf',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(pdfPayload),
+        }
+      );
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.error ?? 'Unable to create invoice PDF.');
+        throw new Error(
+          payload.error ?? `Unable to create ${documentName.toLowerCase()} PDF.`
+        );
       }
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -561,20 +591,23 @@ export function FinanceDashboard({
         if (previewWindow) previewWindow.location.href = url;
         else window.open(url, '_blank', 'noopener,noreferrer');
         window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        setMessage('Invoice preview created without saving records.');
+        setMessage(`${documentName} preview created without saving records.`);
         setMessageIsError(false);
       } else {
         const link = document.createElement('a');
         link.href = url;
-        link.download = `${draft.invoiceNumber || 'invoice'}.pdf`;
+        link.download = `${pdfPayload.invoiceNumber.replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_')}.pdf`;
         link.click();
         window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
         setMessage(
-          'Invoice issued, archived in the client record, and downloaded.'
+          `${documentName} created, archived in the client record, and downloaded.`
         );
         setMessageIsError(false);
         setDraft((current) => ({
-          ...draftWithSettings(settingsQuery.data ?? fallbackInvoiceSettings),
+          ...draftWithSettings(
+            settingsQuery.data ?? fallbackInvoiceSettings,
+            isQuotation
+          ),
           clientId: current.clientId,
           clientName: current.clientName,
           clientDetails: current.clientDetails,
@@ -582,7 +615,7 @@ export function FinanceDashboard({
           clientPhone: current.clientPhone,
           clientTaxId: current.clientTaxId,
         }));
-        setItems([createItem()]);
+        setItems([createItem(isQuotation)]);
         await Promise.all([
           queryClient.invalidateQueries({
             queryKey: ['operations', 'invoices'],
@@ -600,11 +633,11 @@ export function FinanceDashboard({
       const errorMessage =
         error instanceof Error
           ? error.message
-          : 'Unable to create invoice PDF.';
+          : `Unable to create ${documentName.toLowerCase()} PDF.`;
       if (previewWindow && !previewWindow.closed) {
         showPreviewWindowState(
           previewWindow,
-          'Invoice preview could not be created',
+          `${documentName} preview could not be created`,
           errorMessage,
           true
         );
@@ -617,18 +650,19 @@ export function FinanceDashboard({
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <FinanceBreadcrumb
         view={view}
         clientId={clientId}
         clientName={scopedClient?.name || draft.clientName}
       />
       <PageHeader
-        title={isCreateView ? 'Add invoice' : 'Invoices'}
-        description={
-          isCreateView
-            ? 'Prepare a branded PDF invoice and archive it against the client record.'
-            : 'Follow payment status from the invoice ledger, or create a new invoice.'
+        title={
+          isQuotation
+            ? 'Cotação de serviço'
+            : isCreateView
+              ? 'Add invoice'
+              : 'Invoices'
         }
         actions={
           <div className="flex flex-wrap items-center gap-2">
@@ -665,7 +699,7 @@ export function FinanceDashboard({
       {clientsQuery.isError || (!isCreateView && invoicesQuery.isError) ? (
         <EmptyState
           error
-          title="Invoice records could not be loaded"
+          title={`${documentName} records could not be loaded`}
           description={
             (invoicesQuery.error as Error | null)?.message ??
             (clientsQuery.error as Error | null)?.message ??
@@ -678,12 +712,18 @@ export function FinanceDashboard({
             <EmptyState
               error
               title="Client record not found"
-              description="Return to Clients and select a client before adding an invoice."
+              description="Return to Clients and select a client before creating a PDF."
             />
           ) : isCreateView ? (
             <SectionPanel
-              title="Create PDF invoice"
-              description="Preview without saving, or issue to create the invoice, client document, and downloadable PDF."
+              title={
+                isQuotation ? 'Criar cotação de serviço' : 'Create PDF invoice'
+              }
+              description={
+                isQuotation
+                  ? 'Preview the quotation, or create and save its PDF in the client record. Includes your signature as Analista responsável.'
+                  : 'Preview without saving, or issue to create the invoice, client document, and downloadable PDF.'
+              }
               actions={
                 <StatusPill
                   tone={draft.language === 'pt' ? 'success' : 'primary'}
@@ -694,7 +734,7 @@ export function FinanceDashboard({
               bodyClassName="p-0"
             >
               <div className="space-y-0 divide-y">
-                <div className="grid gap-4 p-4 lg:grid-cols-2">
+                <div className="grid gap-workspace p-4 lg:grid-cols-2">
                   <label className="block text-xs font-medium">
                     Saved client
                     <select
@@ -830,9 +870,11 @@ export function FinanceDashboard({
                   </div>
                 </div>
 
-                <div className="grid gap-4 p-4 md:grid-cols-2 xl:grid-cols-4">
+                <div className="grid gap-workspace p-4 md:grid-cols-2 xl:grid-cols-4">
                   <label className="block text-xs font-medium">
-                    Invoice number (optional)
+                    {isQuotation
+                      ? 'Quotation number (optional)'
+                      : 'Invoice number (optional)'}
                     <Input
                       value={draft.invoiceNumber}
                       onChange={(event) =>
@@ -860,21 +902,23 @@ export function FinanceDashboard({
                       className="mt-1"
                     />
                   </label>
-                  <label className="block text-xs font-medium">
-                    Expiration date
-                    <Input
-                      id="invoice-due-date"
-                      type="date"
-                      value={draft.dueDate}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          dueDate: event.target.value,
-                        }))
-                      }
-                      className="mt-1"
-                    />
-                  </label>
+                  {!isQuotation ? (
+                    <label className="block text-xs font-medium">
+                      Expiration date
+                      <Input
+                        id="invoice-due-date"
+                        type="date"
+                        value={draft.dueDate}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            dueDate: event.target.value,
+                          }))
+                        }
+                        className="mt-1"
+                      />
+                    </label>
+                  ) : null}
                   <label className="block text-xs font-medium">
                     Tax
                     <div className="mt-1 flex items-center gap-2">
@@ -902,7 +946,7 @@ export function FinanceDashboard({
                         Items
                       </h3>
                       <p className="text-xs text-muted-foreground">
-                        Quantity and unit price calculate the invoice total.
+                        Quantity and unit price calculate the total.
                       </p>
                     </div>
                     <Button
@@ -923,8 +967,9 @@ export function FinanceDashboard({
                     >
                       <label className="block text-xs font-medium">
                         Description
-                        <Input
+                        <textarea
                           id={`invoice-item-${index}-description`}
+                          rows={isQuotation ? 4 : 2}
                           value={item.description}
                           onChange={(event) =>
                             updateItem(
@@ -938,7 +983,7 @@ export function FinanceDashboard({
                               ? 'Stable isotope analyses or technical service'
                               : 'Additional service'
                           }
-                          className="mt-1"
+                          className={`${textareaClassName} mt-1`}
                         />
                       </label>
                       <label className="block text-xs font-medium">
@@ -987,7 +1032,7 @@ export function FinanceDashboard({
                   ))}
                 </div>
 
-                <div className="grid gap-4 p-4 lg:grid-cols-2">
+                <div className="grid gap-workspace p-4 lg:grid-cols-2">
                   <label className="block text-xs font-medium lg:col-span-2">
                     Service description
                     <textarea
@@ -1030,67 +1075,77 @@ export function FinanceDashboard({
                       className={`${textareaClassName} mt-1 min-h-28`}
                     />
                   </label>
-                  <label className="block text-xs font-medium lg:col-span-2">
-                    Bank details
-                    <select
-                      value={draft.paymentInstructions}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          paymentInstructions: event.target.value as
-                            | 'national'
-                            | 'international'
-                            | 'both',
-                        }))
-                      }
-                      className={`${selectClassName} mt-1`}
-                    >
-                      <option value="national">National</option>
-                      <option value="international">International</option>
-                      <option value="both">National and international</option>
-                    </select>
-                  </label>
-                  {draft.paymentInstructions !== 'international' ? (
-                    <label className="block text-xs font-medium">
-                      National payment instructions
-                      <textarea
-                        value={draft.nationalPaymentDetails}
-                        onChange={(event) =>
-                          setDraft((current) => ({
-                            ...current,
-                            nationalPaymentDetails: event.target.value,
-                          }))
-                        }
-                        placeholder="Bank, branch, account, PIX, beneficiary, and reference"
-                        className={`${textareaClassName} mt-1 min-h-28`}
-                      />
-                    </label>
-                  ) : null}
-                  {draft.paymentInstructions !== 'national' ? (
-                    <label className="block text-xs font-medium">
-                      International payment instructions
-                      <textarea
-                        value={draft.internationalPaymentDetails}
-                        onChange={(event) =>
-                          setDraft((current) => ({
-                            ...current,
-                            internationalPaymentDetails: event.target.value,
-                          }))
-                        }
-                        placeholder="Account holder, SWIFT/BIC, account, bank address, and reference"
-                        className={`${textareaClassName} mt-1 min-h-28`}
-                      />
-                    </label>
+                  {!isQuotation ? (
+                    <>
+                      <label className="block text-xs font-medium lg:col-span-2">
+                        Bank details
+                        <select
+                          value={draft.paymentInstructions}
+                          onChange={(event) =>
+                            setDraft((current) => ({
+                              ...current,
+                              paymentInstructions: event.target.value as
+                                | 'national'
+                                | 'international'
+                                | 'both',
+                            }))
+                          }
+                          className={`${selectClassName} mt-1`}
+                        >
+                          <option value="national">National</option>
+                          <option value="international">International</option>
+                          <option value="both">
+                            National and international
+                          </option>
+                        </select>
+                      </label>
+                      {draft.paymentInstructions !== 'international' ? (
+                        <label className="block text-xs font-medium">
+                          National payment instructions
+                          <textarea
+                            value={draft.nationalPaymentDetails}
+                            onChange={(event) =>
+                              setDraft((current) => ({
+                                ...current,
+                                nationalPaymentDetails: event.target.value,
+                              }))
+                            }
+                            placeholder="Bank, branch, account, PIX, beneficiary, and reference"
+                            className={`${textareaClassName} mt-1 min-h-28`}
+                          />
+                        </label>
+                      ) : null}
+                      {draft.paymentInstructions !== 'national' ? (
+                        <label className="block text-xs font-medium">
+                          International payment instructions
+                          <textarea
+                            value={draft.internationalPaymentDetails}
+                            onChange={(event) =>
+                              setDraft((current) => ({
+                                ...current,
+                                internationalPaymentDetails: event.target.value,
+                              }))
+                            }
+                            placeholder="Account holder, SWIFT/BIC, account, bank address, and reference"
+                            className={`${textareaClassName} mt-1 min-h-28`}
+                          />
+                        </label>
+                      ) : null}
+                    </>
                   ) : null}
                 </div>
 
                 <div className="flex flex-col gap-4 bg-slate-50 p-4 dark:bg-slate-900/50 sm:flex-row sm:items-end sm:justify-between">
                   <div>
                     <p className="text-xs text-muted-foreground">
-                      Estimated amount due
+                      {isQuotation ? 'Quotation total' : 'Estimated amount due'}
                     </p>
                     <p className="mt-1 font-display text-2xl font-semibold tracking-[-0.02em] tabular-nums">
-                      {formatMoney(amountDue, draft.currency || 'BRL')}
+                      {formatMoney(
+                        amountDue,
+                        draft.currency || 'BRL',
+                        draft.language
+                      )}
                     </p>
                     <p
                       className={`mt-1 min-h-4 text-[11px] ${
@@ -1118,8 +1173,10 @@ export function FinanceDashboard({
                     >
                       <FilePlus2 className="mr-1.5 h-4 w-4" />
                       {pdfBusy === 'issue'
-                        ? 'Issuing invoice…'
-                        : 'Create PDF invoice'}
+                        ? `Creating ${documentName.toLowerCase()}…`
+                        : isQuotation
+                          ? 'Criar PDF da cotação'
+                          : 'Create PDF invoice'}
                     </Button>
                   </div>
                 </div>
@@ -1131,7 +1188,7 @@ export function FinanceDashboard({
             <>
               <Toolbar>
                 <div className="relative max-w-xl">
-                  <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}

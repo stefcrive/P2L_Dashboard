@@ -85,10 +85,9 @@ export function InvoiceSettingsDashboard() {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <PageHeader
         title="Invoice settings"
-        description="Save the issuing organisation and payment instructions used as defaults for every new invoice."
         actions={
           <StatusPill tone={settingsQuery.isFetching ? 'warning' : 'success'}>
             {settingsQuery.isFetching ? 'Loading defaults' : 'Defaults ready'}
@@ -96,7 +95,7 @@ export function InvoiceSettingsDashboard() {
         }
       />
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.72fr)]">
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.72fr)]">
         <SectionPanel
           title="Issued by"
           description="These legal and billing details appear in the issuer block on the PDF."
@@ -112,7 +111,7 @@ export function InvoiceSettingsDashboard() {
                 }))
               }
               placeholder="Legal entity, department, address, tax identifier, and contact details"
-              className={`${textareaClassName} mt-1 min-h-44`}
+              className={`${textareaClassName} mt-1 min-h-28`}
             />
           </label>
 
@@ -136,7 +135,7 @@ export function InvoiceSettingsDashboard() {
           title="Invoice defaults"
           description="New invoice drafts start with these values and can still be changed individually."
         >
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+          <div className="grid gap-workspace sm:grid-cols-2">
             <label className="block text-xs font-medium">
               Language
               <select
@@ -167,7 +166,7 @@ export function InvoiceSettingsDashboard() {
                 className="mt-1 uppercase"
               />
             </label>
-            <label className="block text-xs font-medium sm:col-span-2 xl:col-span-1 2xl:col-span-2">
+            <label className="block text-xs font-medium sm:col-span-2">
               Payment details shown
               <select
                 value={form.default_payment_instructions}
@@ -195,7 +194,7 @@ export function InvoiceSettingsDashboard() {
         title="Ways to pay"
         description="Both blocks are printed side by side when national and international details are selected."
       >
-        <div className="grid gap-5 lg:grid-cols-2">
+        <div className="grid gap-3 lg:grid-cols-2">
           <label className="block text-xs font-medium">
             National payment details
             <textarea
@@ -207,7 +206,7 @@ export function InvoiceSettingsDashboard() {
                 }))
               }
               placeholder="Bank, branch, account, PIX, beneficiary, tax ID, and payment reference"
-              className={`${textareaClassName} mt-1 min-h-44`}
+              className={`${textareaClassName} mt-1 min-h-28`}
             />
           </label>
           <label className="block text-xs font-medium">
@@ -221,7 +220,7 @@ export function InvoiceSettingsDashboard() {
                 }))
               }
               placeholder="Account holder, SWIFT/BIC, account or IBAN, bank address, and payment reference"
-              className={`${textareaClassName} mt-1 min-h-44`}
+              className={`${textareaClassName} mt-1 min-h-28`}
             />
           </label>
         </div>

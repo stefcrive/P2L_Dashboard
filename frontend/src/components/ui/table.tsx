@@ -8,7 +8,7 @@ interface TableProps extends React.HTMLAttributes<HTMLTableElement> {
 
 const Table = React.forwardRef<HTMLTableElement, TableProps>(
   ({ className, containerClassName, ...props }, ref) => (
-    <div className={cn('relative w-full overflow-auto', containerClassName)}>
+    <div tabIndex={0} role="region" aria-label="Scrollable table" className={cn('workspace-table relative min-w-0 w-full overflow-auto', containerClassName)}>
       <table
         ref={ref}
         className={cn('w-full caption-bottom text-xs', className)}
@@ -25,7 +25,7 @@ const TableHeader = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <thead
     ref={ref}
-    className={cn('bg-slate-50 dark:bg-slate-900 [&_tr]:border-b', className)}
+    className={cn('bg-muted [&_tr]:border-b', className)}
     {...props}
   />
 ));
@@ -65,7 +65,7 @@ const TableHead = React.forwardRef<
   <th
     ref={ref}
     className={cn(
-      'h-8 whitespace-nowrap px-3 text-left align-middle font-mono text-[10px] font-medium uppercase tracking-[0.04em] text-muted-foreground',
+      'h-8 whitespace-nowrap px-3 text-left align-middle text-xs font-medium text-muted-foreground',
       className
     )}
     {...props}
@@ -79,7 +79,7 @@ const TableCell = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <td
     ref={ref}
-    className={cn('whitespace-nowrap px-3 py-2 align-middle', className)}
+    className={cn('whitespace-nowrap px-2 py-1 align-middle', className)}
     {...props}
   />
 ));

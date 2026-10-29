@@ -7,9 +7,9 @@ export const dynamic = 'force-dynamic';
 
 export async function DELETE(
   _request: Request,
-  context: { params: { id: string } },
+  context: { params: Promise<{ id: string }> },
 ) {
-  const id = Number.parseInt(context.params.id, 10);
+  const id = Number.parseInt((await context.params).id, 10);
   if (!Number.isSafeInteger(id) || id <= 0) {
     return NextResponse.json({ error: 'Invalid source id.' }, { status: 400 });
   }

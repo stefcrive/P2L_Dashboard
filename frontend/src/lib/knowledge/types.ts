@@ -53,6 +53,39 @@ export interface ParsedMessage {
   deterministicMetadata: Record<string, unknown>;
 }
 
+export interface ParsedVisualAsset {
+  stableId: string;
+  pageNumber: number;
+  kind: 'chart' | 'diagram' | 'figure' | 'photo' | 'table' | 'other';
+  caption: string;
+  description: string;
+  altText: string;
+  storagePath: string;
+  mimeType: string;
+  sha256: string;
+  width: number;
+  height: number;
+  bbox: Record<string, unknown>;
+  extractionModel: string;
+  promptVersion: string;
+  confidence: number | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface VisualReference {
+  id: number;
+  pageNumber: number;
+  kind: string;
+  caption: string;
+  description: string;
+  altText: string;
+  width: number;
+  height: number;
+  bbox: Record<string, unknown>;
+  imageUrl: string;
+  sourceUrl: string;
+}
+
 export interface KnowledgeChunk {
   chunkIndex: number;
   content: string;
@@ -78,10 +111,12 @@ export interface EnrichmentResult {
 
 export interface IngestionJobOptions {
   sourcePath: string;
+  engineId?: number | null;
   mode: IngestionMode;
   enrichmentModel: string;
   embeddingModel: string;
   embeddingDimensions: number;
+  technicalReviewEnabled: boolean;
   chunkTargetTokens: number;
   chunkOverlapTokens: number;
 }
@@ -104,6 +139,42 @@ export interface RetrievalEvidence {
   exactRank: number | null;
   rrfScore: number;
   rerankScore?: number;
+  visual?: VisualReference | null;
+}
+
+export interface KnowledgeTraceSearch {
+  query: string;
+  mode: 'hybrid' | 'text' | 'semantic';
+}
+
+export interface KnowledgeTraceRound {
+  round: number;
+  candidateCount: number;
+  topChunkIds?: number[];
+  sufficientEvidence?: boolean;
+  directAnswer?: boolean;
+  confidence?: number;
+  missingFacts: string[];
+  followUpSearches: KnowledgeTraceSearch[];
+  neighborChunkIds: number[];
+  addedChunkIds: number[];
+  rationale?: string;
+  error?: string;
+}
+
+export interface KnowledgeRetrievalTrace {
+  mode: 'thinking';
+  initialQueries: string[];
+  queries: string[];
+  initialCandidateCount: number;
+  finalEvidenceCount: number;
+  rounds: KnowledgeTraceRound[];
+  stopReason: string;
+  retrievalMs: number;
+  generationMs: number;
+  verificationMs: number;
+  verificationSupported: boolean | null;
+  warnings: string[];
 }
 
 export interface KnowledgeOverview {

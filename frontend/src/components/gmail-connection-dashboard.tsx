@@ -64,7 +64,7 @@ const capabilities = [
 
 function GoogleMailMark() {
   return (
-    <div className="relative grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-xl border bg-white shadow-sm dark:bg-slate-950">
+    <div className="relative grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-lg border bg-white shadow-sm dark:bg-slate-950">
       <Mail className="h-5 w-5 text-slate-700 dark:text-slate-200" aria-hidden="true" />
       <span className="absolute inset-x-0 top-0 h-1 bg-[linear-gradient(90deg,#4285f4_0_25%,#ea4335_25%_50%,#fbbc04_50%_75%,#34a853_75%)]" />
     </div>
@@ -131,11 +131,10 @@ export function GmailConnectionDashboard() {
   const configured = Boolean(status?.configured);
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <PageHeader
         eyebrow="Agent integration"
         title="Agent email"
-        description="Connect one Gmail mailbox so the P2L agent can find correspondence, read context, prepare replies, and send only on request."
         actions={
           <StatusPill tone={connected ? 'success' : configured ? 'warning' : 'neutral'}>
             {statusQuery.isLoading
@@ -149,13 +148,13 @@ export function GmailConnectionDashboard() {
         }
       />
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(19rem,0.75fr)]">
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.25fr)_minmax(19rem,0.75fr)]">
         <SectionPanel
           title="Gmail account"
           description="The agent uses this account only when an email task calls for it."
           bodyClassName="p-0"
         >
-          <div className="flex flex-col gap-5 p-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-workspace p-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-3.5">
               <GoogleMailMark />
               <div className="min-w-0">
@@ -233,7 +232,7 @@ export function GmailConnectionDashboard() {
             </li>
           </ul>
           <div className="mt-4 rounded-md border bg-muted/35 p-3">
-            <p className="font-mono text-[10px] font-medium uppercase tracking-[0.05em] text-muted-foreground">
+            <p className="font-mono text-[11px] font-medium uppercase tracking-[0.05em] text-muted-foreground">
               Try in the assistant
             </p>
             <p className="mt-1.5 text-xs leading-5">
@@ -248,18 +247,18 @@ export function GmailConnectionDashboard() {
           title="Finish Google setup"
           description="Add a Web application OAuth client, enable the Gmail API, and register the callback URL."
         >
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+          <div className="grid gap-workspace lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
             <div>
               <p className="text-xs leading-5 text-muted-foreground">
                 Add the missing server variables, then restart the application. Use
-                <span className="mx-1 rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
+                <span className="mx-1 break-all rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground">
                   http://localhost:3000/api/integrations/gmail/callback
                 </span>
                 as the authorized redirect URI for local development.
               </p>
               <div className="mt-3 flex flex-wrap gap-1.5">
                 {status.missingConfiguration.map((name) => (
-                  <code key={name} className="rounded border bg-background px-2 py-1 text-[10px]">
+                  <code key={name} className="rounded border bg-background px-2 py-1 text-[11px]">
                     {name}
                   </code>
                 ))}

@@ -12,10 +12,7 @@ import {
 } from 'pdf-lib';
 
 export type InvoiceLanguage = 'en' | 'pt';
-export type PaymentInstructionMode =
-  | 'national'
-  | 'international'
-  | 'both';
+export type PaymentInstructionMode = 'national' | 'international' | 'both';
 
 export type InvoiceItemInput = {
   description: string;
@@ -24,6 +21,7 @@ export type InvoiceItemInput = {
 };
 
 export type InvoicePdfPayload = {
+  documentType?: 'invoice' | 'quotation';
   invoiceNumber: string;
   language: InvoiceLanguage;
   currency: string;
@@ -99,8 +97,9 @@ const copy = {
 function findRepositoryRoot() {
   const candidates = [process.cwd(), path.resolve(process.cwd(), '..')];
   return (
-    candidates.find((candidate) => fs.existsSync(path.join(candidate, 'logos'))) ??
-    process.cwd()
+    candidates.find((candidate) =>
+      fs.existsSync(path.join(candidate, 'logos'))
+    ) ?? process.cwd()
   );
 }
 
@@ -298,7 +297,41 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
   };
   const images = await embedBrandImages(pdf);
   const language = payload.language;
-  const labels = copy[language];
+  const isQuotation = payload.documentType === 'quotation';
+  const labels = {
+    ...copy[language],
+    ...(isQuotation
+      ? language === 'pt'
+        ? {
+            title: 'COTAÇÃO DE SERVIÇO',
+            invoiceNumber: 'Número da cotação',
+            billedTo: 'Tomador do serviço',
+            amountDue: 'Total da cotação',
+          }
+        : {
+            title: 'SERVICE QUOTATION',
+            invoiceNumber: 'Quotation number',
+            billedTo: 'Prepared for',
+            amountDue: 'Quotation total',
+          }
+      : {}),
+  };
+  const signature = isQuotation
+    ? await pdf.embedPng(
+        await fs.promises.readFile(
+          path.join(findRepositoryRoot(), 'logos', 'signature-1.png')
+        )
+      )
+    : null;
+  const money = (value: number) =>
+    isQuotation
+      ? new Intl.NumberFormat(language === 'pt' ? 'pt-BR' : 'en-US', {
+          style: 'currency',
+          currency: payload.currency,
+        })
+          .format(value)
+          .replace(/\u00a0/g, ' ')
+      : formatMoney(value, payload.currency, language);
   const subtotal = payload.items.reduce(
     (sum, item) => sum + item.quantity * item.unitPrice,
     0
@@ -358,39 +391,42 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
   page.drawText(labels.title, {
     x: margin,
     y,
-    size: 28,
+    size: isQuotation ? 21 : 28,
     font: fonts.bold,
     color: navy,
   });
+  const metadataY = isQuotation ? y - 30 : y + 10;
+  const numberX = isQuotation ? margin : 326;
+  const dateX = isQuotation ? 326 : 432;
   page.drawText(labels.invoiceNumber, {
-    x: 366,
-    y: y + 10,
+    x: numberX,
+    y: metadataY,
     size: 7.5,
     font: fonts.bold,
     color: muted,
   });
   page.drawText(safePdfText(payload.invoiceNumber), {
-    x: 366,
-    y: y - 5,
-    size: 10,
+    x: numberX,
+    y: metadataY - 15,
+    size: 8,
     font: fonts.regular,
     color: navy,
   });
   page.drawText(labels.issueDate, {
-    x: 468,
-    y: y + 10,
+    x: dateX,
+    y: metadataY,
     size: 7.5,
     font: fonts.bold,
     color: muted,
   });
   page.drawText(safePdfText(formatDate(payload.issueDate, language)), {
-    x: 468,
-    y: y - 5,
-    size: 8.5,
+    x: dateX,
+    y: metadataY - 15,
+    size: 8,
     font: fonts.regular,
     color: navy,
   });
-  y -= 48;
+  y -= isQuotation ? 62 : 48;
   page.drawLine({
     start: { x: margin, y },
     end: { x: A4.width - margin, y },
@@ -414,50 +450,56 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
     font: fonts.bold,
     color: muted,
   });
-  const clientLines = wrapText(
-    `${payload.clientName}\n${payload.clientDetails}`,
-    fonts.regular,
-    9,
-    225
+  const drawParty = (
+    name: string,
+    details: string,
+    x: number,
+    nameSize: number
+  ) => {
+    const nameLines = wrapText(name, fonts.bold, nameSize, 225);
+    const detailLines = details.trim()
+      ? wrapText(details, fonts.regular, 9, 225)
+      : [];
+    const lines = [...nameLines, ...detailLines];
+    lines.forEach((text, index) => {
+      const isName = index < nameLines.length;
+      page.drawText(text, {
+        x,
+        y: partyTop - 20 - index * 12,
+        size: isName ? nameSize : 9,
+        font: isName ? fonts.bold : fonts.regular,
+        color: isName ? navy : muted,
+      });
+    });
+    return lines.length;
+  };
+  const [issuerName, ...issuerDetails] = payload.issuerDetails
+    .trim()
+    .split(/\r?\n/);
+  const partyLineCount = Math.max(
+    drawParty(payload.clientName, payload.clientDetails, margin, 10),
+    drawParty(issuerName, issuerDetails.join('\n'), 326, 9.5)
   );
-  const issuerLines = wrapText(payload.issuerDetails, fonts.regular, 9, 225);
-  const partyLineCount = Math.max(clientLines.length, issuerLines.length);
-  clientLines.forEach((text, index) => {
-    page.drawText(text, {
-      x: margin,
-      y: partyTop - 20 - index * 12,
-      size: index === 0 ? 10 : 9,
-      font: index === 0 ? fonts.bold : fonts.regular,
-      color: index === 0 ? navy : muted,
-    });
-  });
-  issuerLines.forEach((text, index) => {
-    page.drawText(text, {
-      x: 326,
-      y: partyTop - 20 - index * 12,
-      size: index === 0 ? 9.5 : 9,
-      font: index === 0 ? fonts.bold : fonts.regular,
-      color: index === 0 ? navy : muted,
-    });
-  });
   y = partyTop - 42 - partyLineCount * 12;
-  ensureSpace(55);
-  page.drawText(
-    safePdfText(
-      labels.dueHeadline(
-        formatMoney(total, payload.currency, language),
-        formatDate(payload.dueDate, language)
-      )
-    ),
-    {
-      x: margin,
-      y,
-      size: 19,
-      font: fonts.bold,
-      color: navy,
-    }
-  );
-  y -= 46;
+  if (!isQuotation) {
+    ensureSpace(55);
+    page.drawText(
+      safePdfText(
+        labels.dueHeadline(
+          formatMoney(total, payload.currency, language),
+          formatDate(payload.dueDate, language)
+        )
+      ),
+      {
+        x: margin,
+        y,
+        size: 19,
+        font: fonts.bold,
+        color: navy,
+      }
+    );
+    y -= 46;
+  }
 
   if (payload.serviceDescription.trim()) {
     drawLines(payload.serviceDescription, {
@@ -469,113 +511,124 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
     y -= 14;
   }
 
-  ensureSpace(52 + payload.items.length * 38);
-  page.drawRectangle({
-    x: margin,
-    y: y - 8,
-    width: contentWidth,
-    height: 24,
-    color: cyan,
-    opacity: 0.075,
-  });
-  page.drawText(labels.product, {
-    x: margin,
-    y,
-    size: 8,
-    font: fonts.bold,
-    color: muted,
-  });
-  page.drawText(labels.quantity, {
-    x: 312,
-    y,
-    size: 8,
-    font: fonts.bold,
-    color: muted,
-  });
-  page.drawText(labels.unitPrice, {
-    x: 380,
-    y,
-    size: 8,
-    font: fonts.bold,
-    color: muted,
-  });
-  page.drawText(labels.tax, {
-    x: 459,
-    y,
-    size: 8,
-    font: fonts.bold,
-    color: muted,
-  });
-  page.drawText(labels.total, {
-    x: 527,
-    y,
-    size: 8,
-    font: fonts.bold,
-    color: muted,
-  });
-  y -= 12;
-  page.drawLine({
-    start: { x: margin, y },
-    end: { x: A4.width - margin, y },
-    thickness: 0.8,
-    color: line,
-  });
-  y -= 18;
+  ensureSpace(80);
+  const drawTableHeader = () => {
+    page.drawRectangle({
+      x: margin,
+      y: y - 8,
+      width: contentWidth,
+      height: 24,
+      color: cyan,
+      opacity: 0.075,
+    });
+    page.drawText(labels.product, {
+      x: margin,
+      y,
+      size: 8,
+      font: fonts.bold,
+      color: muted,
+    });
+    page.drawText(labels.quantity, {
+      x: 312,
+      y,
+      size: 8,
+      font: fonts.bold,
+      color: muted,
+    });
+    page.drawText(labels.unitPrice, {
+      x: 380,
+      y,
+      size: 8,
+      font: fonts.bold,
+      color: muted,
+    });
+    page.drawText(labels.tax, {
+      x: 459,
+      y,
+      size: 8,
+      font: fonts.bold,
+      color: muted,
+    });
+    page.drawText(labels.total, {
+      x: 527,
+      y,
+      size: 8,
+      font: fonts.bold,
+      color: muted,
+    });
+    y -= 12;
+    page.drawLine({
+      start: { x: margin, y },
+      end: { x: A4.width - margin, y },
+      thickness: 0.8,
+      color: line,
+    });
+    y -= 18;
+  };
+  drawTableHeader();
   for (const item of payload.items) {
-    ensureSpace(40);
     const descriptionLines = wrapText(
       item.description,
       fonts.regular,
       8.5,
       232
-    ).slice(0, 3);
-    descriptionLines.forEach((text, index) =>
+    );
+    const rowHeight = Math.max(32, descriptionLines.length * 11 + 10);
+    if (y - Math.min(rowHeight, 600) < 70) {
+      addPage();
+      drawTableHeader();
+    }
+    // Keep the amounts aligned with the first line, including on continued pages.
+    const rowPage = page;
+    const rowY = y;
+    descriptionLines.forEach((text) => {
+      if (y - 11 < 70) {
+        addPage();
+        drawTableHeader();
+      }
       page.drawText(text, {
         x: margin,
-        y: y - index * 11,
+        y,
         size: 8.5,
         font: fonts.regular,
         color: navy,
-      })
-    );
+      });
+      y -= 11;
+    });
     const quantityText = formatNumber(item.quantity);
-    page.drawText(quantityText, {
+    rowPage.drawText(quantityText, {
       x: 360 - fonts.regular.widthOfTextAtSize(quantityText, 8.5),
-      y,
+      y: rowY,
       size: 8.5,
       font: fonts.regular,
       color: navy,
     });
-    const unitPriceText = formatMoney(
-      item.unitPrice,
-      payload.currency,
-      language
-    );
-    page.drawText(unitPriceText, {
+    const unitPriceText = money(item.unitPrice);
+    rowPage.drawText(unitPriceText, {
       x: 440 - fonts.regular.widthOfTextAtSize(unitPriceText, 8.5),
-      y,
+      y: rowY,
       size: 8.5,
       font: fonts.regular,
       color: navy,
     });
     const taxText = `${formatNumber(payload.taxPercent)}%`;
-    page.drawText(taxText, {
+    rowPage.drawText(taxText, {
       x: 475 - fonts.regular.widthOfTextAtSize(taxText, 8.5),
-      y,
+      y: rowY,
       size: 8.5,
       font: fonts.regular,
       color: navy,
     });
     const itemTotal = item.quantity * item.unitPrice;
-    const totalText = formatMoney(itemTotal, payload.currency, language);
-    page.drawText(totalText, {
+    const totalText = money(itemTotal);
+    rowPage.drawText(totalText, {
       x: A4.width - margin - fonts.regular.widthOfTextAtSize(totalText, 8.5),
-      y,
+      y: rowY,
       size: 8.5,
       font: fonts.regular,
       color: navy,
     });
-    y -= Math.max(32, descriptionLines.length * 11 + 10);
+    y -= Math.max(10, 32 - descriptionLines.length * 11);
     page.drawLine({
       start: { x: margin, y: y + 8 },
       end: { x: A4.width - margin, y: y + 8 },
@@ -609,97 +662,93 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
     });
     y -= bold ? 18 : 15;
   };
-  drawTotal(
-    labels.excludingTax,
-    formatMoney(subtotal, payload.currency, language)
-  );
-  drawTotal(
-    labels.totalTax,
-    formatMoney(taxAmount, payload.currency, language)
-  );
-  drawTotal(labels.amountDue, formatMoney(total, payload.currency, language), true);
+  drawTotal(labels.excludingTax, money(subtotal));
+  drawTotal(labels.totalTax, money(taxAmount));
+  drawTotal(labels.amountDue, money(total), true);
   y -= 15;
 
-  ensureSpace(80);
-  page.drawText(labels.waysToPay, {
-    x: margin,
-    y,
-    size: 14,
-    font: fonts.bold,
-    color: navy,
-  });
-  y -= 18;
-  page.drawLine({
-    start: { x: margin, y },
-    end: { x: A4.width - margin, y },
-    thickness: 0.8,
-    color: line,
-  });
-  y -= 20;
+  if (!isQuotation) {
+    ensureSpace(80);
+    page.drawText(labels.waysToPay, {
+      x: margin,
+      y,
+      size: 14,
+      font: fonts.bold,
+      color: navy,
+    });
+    y -= 18;
+    page.drawLine({
+      start: { x: margin, y },
+      end: { x: A4.width - margin, y },
+      thickness: 0.8,
+      color: line,
+    });
+    y -= 20;
 
-  const paymentSections: Array<{ title: string; details: string }> = [];
-  if (
-    payload.paymentInstructions === 'national' ||
-    payload.paymentInstructions === 'both'
-  ) {
-    paymentSections.push({
-      title: labels.national,
-      details: payload.nationalPaymentDetails,
-    });
-  }
-  if (
-    payload.paymentInstructions === 'international' ||
-    payload.paymentInstructions === 'both'
-  ) {
-    paymentSections.push({
-      title: labels.international,
-      details: payload.internationalPaymentDetails,
-    });
-  }
-  if (paymentSections.length) {
-    const paymentGap = 22;
-    const paymentWidth =
-      paymentSections.length === 2
-        ? (contentWidth - paymentGap) / 2
-        : contentWidth;
-    const wrappedSections = paymentSections.map((section) => ({
-      ...section,
-      lines: wrapText(
-        section.details.trim() ||
-          (language === 'pt'
-            ? 'Preencha os dados bancários antes de emitir.'
-            : 'Complete the bank details before issuing.'),
-        fonts.regular,
-        7.8,
-        paymentWidth
-      ),
-    }));
-    const paymentHeight =
-      25 +
-      Math.max(...wrappedSections.map((section) => section.lines.length)) *
-        10.5;
-    ensureSpace(paymentHeight);
-    const paymentTop = y;
-    wrappedSections.forEach((section, index) => {
-      const x = margin + index * (paymentWidth + paymentGap);
-      page.drawText(section.title, {
-        x,
-        y: paymentTop,
-        size: 9,
-        font: fonts.bold,
-        color: navy,
+    const paymentSections: Array<{ title: string; details: string }> = [];
+    if (
+      payload.paymentInstructions === 'national' ||
+      payload.paymentInstructions === 'both'
+    ) {
+      paymentSections.push({
+        title: labels.national,
+        details: payload.nationalPaymentDetails,
       });
-      section.lines.forEach((text, lineIndex) => {
-        page.drawText(text, {
+    }
+    if (
+      payload.paymentInstructions === 'international' ||
+      payload.paymentInstructions === 'both'
+    ) {
+      paymentSections.push({
+        title: labels.international,
+        details: payload.internationalPaymentDetails,
+      });
+    }
+    if (paymentSections.length) {
+      const paymentGap = 22;
+      const paymentWidth =
+        paymentSections.length === 2
+          ? (contentWidth - paymentGap) / 2
+          : contentWidth;
+      const wrappedSections = paymentSections.map((section) => ({
+        ...section,
+        lines: wrapText(
+          section.details.trim() ||
+            (language === 'pt'
+              ? 'Preencha os dados bancários antes de emitir.'
+              : 'Complete the bank details before issuing.'),
+          fonts.regular,
+          7.8,
+          paymentWidth
+        ),
+      }));
+      const paymentHeight =
+        25 +
+        Math.max(...wrappedSections.map((section) => section.lines.length)) *
+          10.5;
+      ensureSpace(paymentHeight);
+      const paymentTop = y;
+      wrappedSections.forEach((section, index) => {
+        const x = margin + index * (paymentWidth + paymentGap);
+        page.drawText(section.title, {
           x,
-          y: paymentTop - 16 - lineIndex * 10.5,
-          size: 7.8,
-          font: fonts.regular,
-          color: muted,
+          y: paymentTop,
+          size: 9,
+          font: fonts.bold,
+          color: navy,
+        });
+        section.lines.forEach((text, lineIndex) => {
+          page.drawText(text, {
+            x,
+            y: paymentTop - 16 - lineIndex * 10.5,
+            size: 7.8,
+            font: fonts.regular,
+            color: muted,
+          });
         });
       });
-    });
-    y = paymentTop - paymentHeight;
+      y = paymentTop - paymentHeight;
+    }
   }
 
   if (payload.additionalInfo.trim()) {
@@ -721,10 +770,32 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
     });
   }
 
+  if (signature) {
+    ensureSpace(100);
+    y -= 18;
+    const dimensions = signature.scaleToFit(190, 54);
+    const x = (A4.width - dimensions.width) / 2;
+    page.drawImage(signature, { x, y: y - dimensions.height, ...dimensions });
+    y -= dimensions.height + 10;
+    page.drawLine({
+      start: { x: A4.width / 2 - 110, y },
+      end: { x: A4.width / 2 + 110, y },
+      thickness: 0.6,
+      color: line,
+    });
+    const label = 'Analista responsável';
+    page.drawText(label, {
+      x: (A4.width - fonts.bold.widthOfTextAtSize(label, 9)) / 2,
+      y: y - 15,
+      size: 9,
+      font: fonts.bold,
+      color: navy,
+    });
+  }
+
   pages.forEach((currentPage, index) => {
     const footerLeft =
-      payload.footerNote.trim() ||
-      'P2L · EACH-USP · Universidade de São Paulo';
+      payload.footerNote.trim() || 'P2L · EACH-USP · Universidade de São Paulo';
     const footerRight = `${payload.invoiceNumber} · ${labels.page} ${index + 1} / ${pages.length}`;
     currentPage.drawLine({
       start: { x: margin, y: 39 },

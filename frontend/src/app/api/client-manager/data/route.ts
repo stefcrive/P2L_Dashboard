@@ -130,6 +130,20 @@ function applyFilters(
       .map((client) => client.id)
   );
 
+  const allDocumentCountsByClient = new Map<
+    string,
+    { results: number; administrative: number }
+  >();
+  for (const document of documents) {
+    const counts = allDocumentCountsByClient.get(document.client_id) ?? {
+      results: 0,
+      administrative: 0,
+    };
+    if (document.category === 'analysis') counts.results += 1;
+    else counts.administrative += 1;
+    allDocumentCountsByClient.set(document.client_id, counts);
+  }
+
   const filteredDocuments = documents
     .filter((document) => {
       if (filters.year !== null && document.year !== filters.year) {
@@ -190,16 +204,21 @@ function applyFilters(
   const clientsWithDocuments = filteredClients.map((client) => {
     const clientDocuments = documentsByClient.get(client.id) ?? [];
     const clientCreditEvents = creditEventsByClient.get(client.id) ?? [];
+    const documentCounts = allDocumentCountsByClient.get(client.id) ?? {
+      results: 0,
+      administrative: 0,
+    };
 
     return {
       ...client,
       total_documents:
-        clientDocuments.length > 0 || !hasActiveFilters
-          ? clientDocuments.length || client.total_documents
-          : 0,
+        documentCounts.results + documentCounts.administrative ||
+        client.total_documents,
       documents: clientDocuments,
       credit_events: clientCreditEvents,
       current_credit_balance: resolveCurrentBalance(clientCreditEvents),
+      result_files_count: documentCounts.results,
+      administrative_documents_count: documentCounts.administrative,
     };
   });
 
@@ -216,7 +235,7 @@ function applyFilters(
 }
 
 function buildResponse(
-  source: 'local' | 'supabase' | 'filesystem',
+  source: 'local' | 'supabase' | 'neon' | 'filesystem',
   warnings: string[],
   clients: ClientRow[],
   documents: ClientDocumentRow[],
@@ -369,6 +388,7 @@ async function triggerAutomaticSync(
       cache: 'no-store',
       headers: {
         'x-p2l-auto-sync': '1',
+        cookie: request.headers.get('cookie') ?? '',
       },
     });
 
@@ -500,7 +520,7 @@ export async function GET(request: Request) {
       );
     }
 
-    if (clientsData.length === 0 && documentsData.length === 0) {
+    if (clientsData.length === 0 && documentsData.length === 0 && getApplicationDatabaseSource() !== 'neon') {
       const syncWarning = await triggerAutomaticSync(
         request,
         '/api/client-manager/sync'

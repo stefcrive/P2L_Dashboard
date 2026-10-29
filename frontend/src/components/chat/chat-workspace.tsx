@@ -99,7 +99,7 @@ export function ChatWorkspace() {
 
   return (
     <div className="min-h-[560px]">
-      <section className="mx-auto flex h-[calc(100dvh-9rem)] min-h-[560px] max-w-[1280px] flex-col overflow-hidden rounded-lg border border-slate-200 border-t-2 border-t-sky-500 bg-white shadow-xl shadow-slate-900/5 dark:border-slate-800 dark:border-t-sky-500 dark:bg-slate-950">
+      <section className="flex h-[calc(100dvh-var(--app-header-height)-28px)] min-h-[420px] w-full flex-col overflow-hidden rounded-lg border border-slate-200 border-t-2 border-t-sky-500 bg-white shadow-xl shadow-slate-900/5 dark:border-slate-800 dark:border-t-sky-500 dark:bg-slate-950">
         <header className="flex h-12 shrink-0 items-center justify-between border-b border-slate-200 px-3 dark:border-slate-800 sm:px-4">
           <div className="flex min-w-0 items-center gap-2">
             <button
@@ -229,7 +229,7 @@ export function ChatWorkspace() {
                   </div>
                 ) : (
                   <div className="m-auto w-full max-w-2xl py-12 text-center">
-                    <div className="mx-auto grid h-10 w-10 place-items-center rounded-xl border border-sky-200 bg-sky-50 text-sky-600 dark:border-sky-900 dark:bg-sky-950/50 dark:text-sky-400">
+                    <div className="mx-auto grid h-10 w-10 place-items-center rounded-lg border border-sky-200 bg-sky-50 text-sky-600 dark:border-sky-900 dark:bg-sky-950/50 dark:text-sky-400">
                       <Sparkles className="h-5 w-5" />
                     </div>
                     <h1 className="mt-5 font-display text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">

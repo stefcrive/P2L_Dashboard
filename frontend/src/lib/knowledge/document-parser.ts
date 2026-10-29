@@ -1,15 +1,19 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 
-import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 import * as XLSX from 'xlsx';
 
 import { extractImageKnowledge } from './openai';
-import { maskPersonalData, parseMergedConversation } from './parser';
+import { extractPdfVisualKnowledge } from './pdf-visuals';
+import {
+  maskPersonalData,
+  MERGED_CONVERSATION_PARSER_VERSION,
+  parseMergedConversation,
+} from './parser';
 import { extractDeterministicMetadata } from './taxonomy';
-import type { ParsedMessage } from './types';
+import type { ParsedMessage, ParsedVisualAsset } from './types';
 
-export const STRUCTURED_DOCUMENT_PARSER_VERSION = 'structured_document_v2';
+export const STRUCTURED_DOCUMENT_PARSER_VERSION = 'structured_document_v5';
 
 export const SUPPORTED_SOURCE_EXTENSIONS = new Set([
   '.txt',
@@ -45,6 +49,28 @@ function normalizeText(value: string) {
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{4,}/g, '\n\n\n')
     .trim();
+}
+
+// Keep the source document itself immutable, but repair extraction artifacts in
+// the text that is chunked and embedded. These transformations are deliberately
+// conservative: they remove soft hyphens, join alphabetic line-wrap hyphens,
+// and normalize common PDF ligatures without trying to invent missing words.
+export function normalizeDocumentSearchText(value: string) {
+  return normalizeText(value)
+    .replace(/\u00ad/g, '')
+    .replace(/([A-Za-z])-[ \t]*\n(?=[a-z])/g, '$1')
+    .replace(/[ﬀ-ﬆ]/g, (ligature) => {
+      const replacements: Record<string, string> = {
+        'ﬀ': 'ff',
+        'ﬁ': 'fi',
+        'ﬂ': 'fl',
+        'ﬃ': 'ffi',
+        'ﬄ': 'ffl',
+        'ﬅ': 'st',
+        'ﬆ': 'st',
+      };
+      return replacements[ligature] ?? ligature;
+    });
 }
 
 function escapeMarkdownCell(value: unknown) {
@@ -96,7 +122,10 @@ function genericDocumentMessage(
   format: string,
   warnings: string[]
 ): ParsedMessage {
-  const cleanText = normalizeText(maskPersonalData(content));
+  const normalizedContent = normalizeText(content);
+  const cleanText = normalizeDocumentSearchText(
+    maskPersonalData(normalizedContent)
+  );
   const stableId = sha256(`${sourceName}\n${content}`);
   const lines = Math.max(1, content.split('\n').length);
   return {
@@ -110,8 +139,8 @@ function genericDocumentMessage(
     authorEmailHash: null,
     dateRaw: '',
     dateIso: null,
-    bodyRaw: content,
-    bodyNew: content,
+    bodyRaw: normalizedContent,
+    bodyNew: normalizedContent,
     quotedHistory: '',
     signatureText: '',
     cleanText,
@@ -129,9 +158,80 @@ function genericDocumentMessage(
   };
 }
 
+function visualAssetMessage(
+  sourceName: string,
+  asset: ParsedVisualAsset,
+  sourceOrdinal: number
+): ParsedMessage {
+  const subject = `${sourceName} - ${asset.kind} on page ${asset.pageNumber}`;
+  const content = normalizeText(
+    [
+      `# ${subject}`,
+      asset.caption ? `Caption: ${asset.caption}` : '',
+      asset.description,
+    ]
+      .filter(Boolean)
+      .join('\n\n')
+  );
+  return {
+    sourceOrdinal,
+    stableId: asset.stableId,
+    subjectRaw: subject,
+    subjectNormalized: subject,
+    threadKey: sha256(`${sourceName.toLowerCase()}:visual:${asset.pageNumber}`),
+    authorRaw: '',
+    authorDisplay: 'Document visual',
+    authorEmailHash: null,
+    dateRaw: '',
+    dateIso: null,
+    bodyRaw: content,
+    bodyNew: content,
+    quotedHistory: '',
+    signatureText: '',
+    cleanText: content,
+    startOffset: 0,
+    endOffset: content.length,
+    startLine: 1,
+    bodyStartLine: 1,
+    endLine: Math.max(1, content.split('\n').length),
+    warnings: [],
+    deterministicMetadata: {
+      ...extractDeterministicMetadata(`${sourceName}\n${content}`),
+      sourceFormat: 'pdf_visual',
+      extractionIsDerived: true,
+      pageNumber: asset.pageNumber,
+      visualAsset: asset,
+    },
+  };
+}
+
+async function extractPdfText(rawBuffer: Buffer) {
+  // Load native PDF support only when parsing a PDF. Explicit imports ensure
+  // Vercel includes the canvas runtime used by PDF.js in its function bundle.
+  const canvas = await import('@napi-rs/canvas');
+  const globals = globalThis as unknown as Record<string, unknown>;
+  globals.DOMMatrix ??= canvas.DOMMatrix;
+  globals.ImageData ??= canvas.ImageData;
+  globals.Path2D ??= canvas.Path2D;
+  const { PDFParse, VerbosityLevel } = await import('pdf-parse');
+  const parser = new PDFParse({
+    data: rawBuffer,
+    // Malformed embedded font maps are common in scientific PDFs. They do not
+    // prevent text extraction, so keep the queue log focused on actionable
+    // parser errors instead of emitting one warning per affected font.
+    verbosity: VerbosityLevel.ERRORS,
+  });
+  try {
+    return (await parser.getText()).text;
+  } finally {
+    await parser.destroy();
+  }
+}
+
 export async function parseKnowledgeDocument(
   sourcePath: string,
-  rawBuffer: Buffer
+  rawBuffer: Buffer,
+  options: { describeVisuals?: boolean } = {}
 ): Promise<{
   messages: ParsedMessage[];
   parserVersion: string;
@@ -146,7 +246,7 @@ export async function parseKnowledgeDocument(
     if (conversations.length) {
       return {
         messages: conversations,
-        parserVersion: 'merged_conversation_v2',
+        parserVersion: MERGED_CONVERSATION_PARSER_VERSION,
         sourceFormat: 'merged_conversation_text',
       };
     }
@@ -171,21 +271,43 @@ export async function parseKnowledgeDocument(
   }
 
   if (extension === '.pdf') {
-    const parsed = await pdfParse(rawBuffer);
-    const content = normalizeText(`# ${sourceName}\n\n${parsed.text}`);
+    const visualKnowledge = await extractPdfVisualKnowledge({
+      sourcePath,
+      sourceName,
+      rawBuffer,
+      describeVisuals: options.describeVisuals ?? false,
+    });
+    const extractedText =
+      visualKnowledge?.markdown ?? (await extractPdfText(rawBuffer));
+    const content = normalizeText(`# ${sourceName}\n\n${extractedText}`);
     if (!content.replace(`# ${sourceName}`, '').trim()) {
       throw new Error(
-        'The PDF contains no extractable text. Use the planned Docling/OCR bridge for scanned PDFs.'
+        'The PDF contains no extractable text or visual structure.'
       );
+    }
+    const documentMessage = genericDocumentMessage(
+      sourceName,
+      content,
+      visualKnowledge ? 'pdf_docling' : 'pdf_text',
+      visualKnowledge ? [] : ['pdf_visual_extraction_unavailable']
+    );
+    if (visualKnowledge) {
+      documentMessage.deterministicMetadata = {
+        ...documentMessage.deterministicMetadata,
+        visualAssetCount: visualKnowledge.assets.length,
+        extractionWarnings: visualKnowledge.warnings,
+      };
     }
     return {
       messages: [
-        genericDocumentMessage(sourceName, content, 'pdf_text', [
-          'pdf_text_extraction_only',
-          'figures_and_charts_require_docling',
-        ]),
+        documentMessage,
+        ...(visualKnowledge?.assets.map((asset, index) =>
+          visualAssetMessage(sourceName, asset, index + 1)
+        ) ?? []),
       ],
-      parserVersion: STRUCTURED_DOCUMENT_PARSER_VERSION,
+      parserVersion: visualKnowledge
+        ? `${visualKnowledge.parserVersion}_${STRUCTURED_DOCUMENT_PARSER_VERSION}`
+        : STRUCTURED_DOCUMENT_PARSER_VERSION,
       sourceFormat: 'pdf',
     };
   }
@@ -194,7 +316,7 @@ export async function parseKnowledgeDocument(
     const extracted = await extractImageKnowledge(
       rawBuffer,
       IMAGE_MIME_TYPES[extension],
-      sourceName,
+      sourceName
     );
     const content = normalizeText(`# ${sourceName}\n\n${extracted}`);
     return {

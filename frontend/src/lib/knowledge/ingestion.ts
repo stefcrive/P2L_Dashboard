@@ -1,3 +1,4 @@
+import { hydrateKnowledgePath } from '@/lib/cloud/knowledge-files';
 import 'server-only';
 
 import { createHash } from 'node:crypto';
@@ -19,12 +20,14 @@ import {
 import {
   createIngestionReviewCandidate,
   getQuarantinedOrdinals,
+  stageIngestionReviewCandidates,
 } from './review';
 import type {
   EnrichmentResult,
   IngestionJobOptions,
   JobStatus,
   ParsedMessage,
+  ParsedVisualAsset,
 } from './types';
 
 const ENRICHMENT_BATCH_SIZE = 6;
@@ -122,6 +125,7 @@ export async function createIngestionJob(options: IngestionJobOptions) {
   const requestedPath = path.isAbsolute(options.sourcePath)
     ? options.sourcePath
     : path.resolve(config.repositoryRoot, options.sourcePath);
+  await hydrateKnowledgePath(requestedPath);
   const sourcePath = assertPathInsideRepository(requestedPath);
   const files = await walkSourceFiles(sourcePath);
   if (!files.length) {
@@ -136,7 +140,7 @@ export async function createIngestionJob(options: IngestionJobOptions) {
     }))
   );
   const maximumFileBytes =
-    positiveIntegerEnvironment('KNOWLEDGE_MAX_SOURCE_FILE_MB', 32) * 1_048_576;
+    positiveIntegerEnvironment('KNOWLEDGE_MAX_SOURCE_FILE_MB', 128) * 1_048_576;
   const oversized = fileRecords.filter(
     ({ stat }) => stat.size > maximumFileBytes
   );
@@ -149,17 +153,25 @@ export async function createIngestionJob(options: IngestionJobOptions) {
   }
 
   const database = await getKnowledgeDatabase();
+  const defaultEngine = await database.query<{ id: number }>(
+    `SELECT id FROM kb.engines WHERE system_key = 'isogeochem' LIMIT 1`
+  );
+  const targetEngineId =
+    options.engineId ??
+    (defaultEngine.rows[0] ? Number(defaultEngine.rows[0].id) : null);
   return database.transaction(async (transaction) => {
     const duplicate = await transaction.query<{ id: number }>(
       `SELECT id
        FROM kb.ingestion_jobs
        WHERE source_path = $1
          AND mode = $2
+         AND engine_id IS NOT DISTINCT FROM $8
          AND enrichment_model IS NOT DISTINCT FROM $3
          AND embedding_model IS NOT DISTINCT FROM $4
          AND embedding_dimensions = $5
          AND chunk_target_tokens = $6
          AND chunk_overlap_tokens = $7
+         AND technical_review_enabled = $9
          AND status IN ('queued', 'running', 'paused')
        ORDER BY created_at DESC
        LIMIT 1`,
@@ -171,6 +183,8 @@ export async function createIngestionJob(options: IngestionJobOptions) {
         options.embeddingDimensions,
         options.chunkTargetTokens,
         options.chunkOverlapTokens,
+        targetEngineId,
+        options.technicalReviewEnabled,
       ]
     );
     if (duplicate.rows[0]) {
@@ -184,8 +198,9 @@ export async function createIngestionJob(options: IngestionJobOptions) {
     const inserted = await transaction.query<{ id: number }>(
       `INSERT INTO kb.ingestion_jobs (
         mode, source_path, enrichment_model, embedding_model, embedding_dimensions,
-        chunk_target_tokens, chunk_overlap_tokens, total_files
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        engine_id, technical_review_enabled, chunk_target_tokens,
+        chunk_overlap_tokens, total_files
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING id`,
       [
         options.mode,
@@ -193,6 +208,8 @@ export async function createIngestionJob(options: IngestionJobOptions) {
         options.mode === 'enriched' ? options.enrichmentModel : null,
         options.mode === 'parse_only' ? null : options.embeddingModel,
         options.embeddingDimensions,
+        targetEngineId,
+        options.technicalReviewEnabled,
         options.chunkTargetTokens,
         options.chunkOverlapTokens,
         files.length,
@@ -305,9 +322,12 @@ async function getJobOptions(jobId: number) {
     embedding_dimensions: number;
     chunk_target_tokens: number;
     chunk_overlap_tokens: number;
+    engine_id: number | null;
+    technical_review_enabled: boolean;
   }>(
     `SELECT mode, enrichment_model, embedding_model, embedding_dimensions,
-            chunk_target_tokens, chunk_overlap_tokens
+            chunk_target_tokens, chunk_overlap_tokens, engine_id,
+            technical_review_enabled
      FROM kb.ingestion_jobs WHERE id = $1`,
     [jobId]
   );
@@ -435,6 +455,8 @@ async function persistFile(params: {
   overlapTokens: number;
   parserVersion: string;
   sourceFormat: string;
+  engineId: number | null;
+  technicalReviewEnabled: boolean;
 }) {
   const database = await getKnowledgeDatabase();
   let embeddingCursor = 0;
@@ -472,6 +494,16 @@ async function persistFile(params: {
         `UPDATE kb.sources SET status = 'obsolete', updated_at = now()
          WHERE source_path = $1 AND id <> $2 AND status <> 'obsolete'`,
         [params.relativeSourcePath, sourceId]
+      );
+    }
+
+    if (params.engineId) {
+      await transaction.query(
+        `INSERT INTO kb.engine_sources (engine_id, source_id, enabled)
+         VALUES ($1, $2, true)
+         ON CONFLICT (engine_id, source_id)
+         DO UPDATE SET enabled = true, updated_at = now()`,
+        [params.engineId, sourceId]
       );
     }
 
@@ -525,27 +557,30 @@ async function persistFile(params: {
         ]
       );
       const messageId = Number(insertedMessage.rows[0].id);
-      await createIngestionReviewCandidate({
-        database: transaction,
-        message,
-        messageId,
-        sourceId,
-        sourcePath: params.relativeSourcePath,
-        sourceName: params.sourceName,
-        enrichment,
-      });
+      if (params.technicalReviewEnabled) {
+        await createIngestionReviewCandidate({
+          database: transaction,
+          message,
+          messageId,
+          sourceId,
+          sourcePath: params.relativeSourcePath,
+          sourceName: params.sourceName,
+          enrichment,
+        });
+      }
       const chunks = chunkMessage(
         message,
         params.targetTokens,
         params.overlapTokens
       );
+      let firstChunkId: number | null = null;
       for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
         const chunk = chunks[chunkIndex];
         const chunkMetadata = { ...chunk.metadata, ...metadata };
         const embedding = params.embeddingModel
           ? params.embeddings[embeddingCursor++]
           : null;
-        await transaction.query(
+        const insertedChunk = await transaction.query<{ id: number }>(
           `INSERT INTO kb.chunks (
             source_id, message_id, chunk_index, subject, content,
             contextual_content, content_sha256, approx_tokens, start_offset,
@@ -553,7 +588,7 @@ async function persistFile(params: {
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
             $11::vector, $12, $13::jsonb
-          )`,
+          ) RETURNING id`,
           [
             sourceId,
             messageId,
@@ -570,10 +605,69 @@ async function persistFile(params: {
             JSON.stringify(chunkMetadata),
           ]
         );
+        if (chunkIndex === 0) {
+          firstChunkId = Number(insertedChunk.rows[0].id);
+        }
         chunkCount += 1;
         if (chunkIndex > 0 && chunkIndex % 50 === 0) {
           await yieldToEventLoop();
         }
+      }
+      const visualAsset = message.deterministicMetadata.visualAsset as
+        | ParsedVisualAsset
+        | undefined;
+      if (visualAsset) {
+        await transaction.query(
+          `INSERT INTO kb.visual_assets (
+             source_id, message_id, chunk_id, stable_id, page_number, kind,
+             caption, description, alt_text, storage_path, mime_type, sha256,
+             width, height, bbox, extraction_model, prompt_version, confidence,
+             metadata
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+             $13, $14, $15::jsonb, $16, $17, $18, $19::jsonb
+           )
+           ON CONFLICT (source_id, stable_id) DO UPDATE SET
+             message_id = excluded.message_id,
+             chunk_id = excluded.chunk_id,
+             page_number = excluded.page_number,
+             kind = excluded.kind,
+             caption = excluded.caption,
+             description = excluded.description,
+             alt_text = excluded.alt_text,
+             storage_path = excluded.storage_path,
+             mime_type = excluded.mime_type,
+             sha256 = excluded.sha256,
+             width = excluded.width,
+             height = excluded.height,
+             bbox = excluded.bbox,
+             extraction_model = excluded.extraction_model,
+             prompt_version = excluded.prompt_version,
+             confidence = excluded.confidence,
+             metadata = excluded.metadata,
+             updated_at = now()`,
+          [
+            sourceId,
+            messageId,
+            firstChunkId,
+            visualAsset.stableId,
+            visualAsset.pageNumber,
+            visualAsset.kind,
+            visualAsset.caption,
+            visualAsset.description,
+            visualAsset.altText,
+            visualAsset.storagePath,
+            visualAsset.mimeType,
+            visualAsset.sha256,
+            visualAsset.width,
+            visualAsset.height,
+            JSON.stringify(visualAsset.bbox),
+            visualAsset.extractionModel,
+            visualAsset.promptVersion,
+            visualAsset.confidence,
+            JSON.stringify(visualAsset.metadata),
+          ]
+        );
       }
       warningCount += message.warnings.length;
       if (messageIndex > 0 && messageIndex % 25 === 0) {
@@ -687,6 +781,7 @@ export async function processJobStep(jobId: number) {
   const database = await getKnowledgeDatabase();
   const options = await getJobOptions(jobId);
   try {
+    await hydrateKnowledgePath(file.sourcePath);
     const rawBuffer = await fs.readFile(file.sourcePath);
     const fileSha = sha256(rawBuffer);
     await database.query(`UPDATE kb.job_files SET sha256 = $2 WHERE id = $1`, [
@@ -702,7 +797,8 @@ export async function processJobStep(jobId: number) {
     await updateStages(database, jobId, file.id, 'parse');
     const parsedDocument = await parseKnowledgeDocument(
       file.sourcePath,
-      rawBuffer
+      rawBuffer,
+      { describeVisuals: options.mode !== 'parse_only' }
     );
     const reusable = await findReusableSource(
       relativeSourcePath,
@@ -715,6 +811,15 @@ export async function processJobStep(jobId: number) {
       parsedDocument.parserVersion
     );
     if (reusable.reusable) {
+      if (options.engine_id && reusable.sourceId) {
+        await database.query(
+          `INSERT INTO kb.engine_sources (engine_id, source_id, enabled)
+           VALUES ($1, $2, true)
+           ON CONFLICT (engine_id, source_id)
+           DO UPDATE SET enabled = true, updated_at = now()`,
+          [options.engine_id, reusable.sourceId]
+        );
+      }
       await database.query(
         `UPDATE kb.job_files
          SET status = 'skipped', stage = 'complete', finished_at = now(), updated_at = now()
@@ -743,6 +848,40 @@ export async function processJobStep(jobId: number) {
     if (options.mode === 'enriched') {
       await updateStages(database, jobId, file.id, 'enrich');
       enrichments = await enrichMessages(messages, options.enrichment_model!);
+    }
+
+    if (options.mode !== 'parse_only' && options.technical_review_enabled) {
+      const pendingReview = await stageIngestionReviewCandidates({
+        database,
+        messages,
+        sourcePath: relativeSourcePath,
+        sourceName: file.sourceName,
+        enrichments,
+      });
+      if (pendingReview > 0) {
+        await database.query(
+          `UPDATE kb.job_files
+           SET status = 'queued', stage = 'clean', warning_count = $2,
+               embedded_chunks = 0, updated_at = now()
+           WHERE id = $1`,
+          [file.id, pendingReview]
+        );
+        await database.query(
+          `UPDATE kb.ingestion_jobs
+           SET status = 'paused', stage = 'clean', current_file = NULL,
+               heartbeat_at = now(), updated_at = now()
+           WHERE id = $1`,
+          [jobId]
+        );
+        return {
+          finished: false,
+          status: 'paused' as const,
+          processed: false,
+          reviewRequired: true,
+          pendingReview,
+          file: file.sourceName,
+        };
+      }
     }
 
     const allChunks = messages.flatMap((message) =>
@@ -807,6 +946,8 @@ export async function processJobStep(jobId: number) {
       overlapTokens: Number(options.chunk_overlap_tokens),
       parserVersion: parsedDocument.parserVersion,
       sourceFormat: parsedDocument.sourceFormat,
+      engineId: options.engine_id ? Number(options.engine_id) : null,
+      technicalReviewEnabled: options.technical_review_enabled,
     });
     await database.query(
       `UPDATE kb.job_files SET
@@ -855,9 +996,52 @@ export async function processJobStep(jobId: number) {
 
 export async function controlIngestionJob(
   jobId: number,
-  action: 'pause' | 'resume' | 'cancel'
+  action: 'pause' | 'resume' | 'cancel' | 'restore'
 ) {
   const database = await getKnowledgeDatabase();
+  if (action === 'pause' || action === 'resume') {
+    const staleAfterSeconds =
+      positiveIntegerEnvironment('KNOWLEDGE_DOCLING_TIMEOUT_SECONDS', 1_800) +
+      300;
+    await database.query(
+      `UPDATE kb.job_files f
+          SET status = 'queued', stage = 'queued', started_at = NULL,
+              error = NULL, updated_at = now()
+        WHERE f.job_id = $1
+          AND f.status = 'running'
+          AND EXISTS (
+            SELECT 1 FROM kb.ingestion_jobs j
+             WHERE j.id = f.job_id
+               AND j.heartbeat_at < now() - ($2 * interval '1 second')
+          )`,
+      [jobId, staleAfterSeconds]
+    );
+    await database.query(
+      `UPDATE kb.ingestion_jobs
+          SET stage = 'queued', current_file = NULL, updated_at = now()
+        WHERE id = $1
+          AND heartbeat_at < now() - ($2 * interval '1 second')
+          AND NOT EXISTS (
+            SELECT 1 FROM kb.job_files f
+             WHERE f.job_id = kb.ingestion_jobs.id AND f.status = 'running'
+          )`,
+      [jobId, staleAfterSeconds]
+    );
+  }
+  if (action === 'restore') {
+    const restored = await database.query<{ id: number; status: JobStatus }>(
+      `UPDATE kb.ingestion_jobs
+       SET status = 'queued', finished_at = NULL, updated_at = now()
+       WHERE id = $1 AND status = 'cancelled'
+       RETURNING id, status`,
+      [jobId]
+    );
+    if (!restored.rows[0]) {
+      throw new Error('Job not found or is not cancelled.');
+    }
+    return restored.rows[0];
+  }
+
   const nextStatus =
     action === 'pause'
       ? 'paused'
@@ -877,40 +1061,241 @@ export async function controlIngestionJob(
   return result.rows[0];
 }
 
+export async function updateIngestionJobConfiguration(
+  jobId: number,
+  changes: {
+    mode?: IngestionJobOptions['mode'];
+    engineId?: number | null;
+    technicalReviewEnabled?: boolean;
+    enrichmentModel?: string;
+    embeddingModel?: string;
+  }
+) {
+  const database = await getKnowledgeDatabase();
+  const currentResult = await database.query<{
+    status: JobStatus;
+    mode: IngestionJobOptions['mode'];
+    source_path: string;
+    engine_id: number | null;
+    technical_review_enabled: boolean;
+    enrichment_model: string | null;
+    embedding_model: string | null;
+    embedding_dimensions: number;
+    chunk_target_tokens: number;
+    chunk_overlap_tokens: number;
+    started_files: number;
+    committed_files: number;
+  }>(
+    `SELECT j.status, j.mode, j.source_path, j.engine_id,
+            j.technical_review_enabled,
+            j.enrichment_model, j.embedding_model, j.embedding_dimensions,
+            j.chunk_target_tokens, j.chunk_overlap_tokens,
+            count(f.id) FILTER (
+              WHERE f.status <> 'queued' OR f.stage <> 'queued'
+            )::integer AS started_files,
+            count(f.id) FILTER (
+              WHERE f.status IN ('completed', 'skipped', 'failed')
+                 OR f.message_count > 0
+                 OR f.chunk_count > 0
+                 OR f.embedded_chunks > 0
+            )::integer AS committed_files
+       FROM kb.ingestion_jobs j
+       LEFT JOIN kb.job_files f ON f.job_id = j.id
+      WHERE j.id = $1
+      GROUP BY j.id`,
+    [jobId]
+  );
+  const current = currentResult.rows[0];
+  if (!current) throw new Error('Ingestion job not found.');
+  if (!['queued', 'paused'].includes(current.status)) {
+    throw new Error('Only queued or paused jobs can be reconfigured.');
+  }
+  if (Number(current.committed_files) > 0) {
+    throw new Error(
+      'This job already has committed file results. Create a new job to use different processing settings.'
+    );
+  }
+
+  const config = getKnowledgeConfig();
+  const nextEngineId =
+    changes.engineId === undefined ? current.engine_id : changes.engineId;
+  if (
+    nextEngineId !== null &&
+    (!Number.isSafeInteger(nextEngineId) || nextEngineId <= 0)
+  ) {
+    throw new Error('Select a valid knowledge engine.');
+  }
+  if (nextEngineId !== null) {
+    const engine = await database.query<{ id: number }>(
+      'SELECT id FROM kb.engines WHERE id = $1',
+      [nextEngineId]
+    );
+    if (!engine.rows[0]) throw new Error('Knowledge engine not found.');
+  }
+  const options: IngestionJobOptions = {
+    sourcePath: current.source_path,
+    engineId: nextEngineId,
+    mode: changes.mode ?? current.mode,
+    enrichmentModel:
+      changes.enrichmentModel?.trim() ||
+      current.enrichment_model ||
+      config.enrichmentModel,
+    embeddingModel:
+      changes.embeddingModel?.trim() ||
+      current.embedding_model ||
+      config.embeddingModel,
+    embeddingDimensions: Number(current.embedding_dimensions),
+    technicalReviewEnabled:
+      changes.technicalReviewEnabled ?? current.technical_review_enabled,
+    chunkTargetTokens: Number(current.chunk_target_tokens),
+    chunkOverlapTokens: Number(current.chunk_overlap_tokens),
+  };
+  validateJobOptions(options);
+
+  return database.transaction(async (transaction) => {
+    if (Number(current.started_files) > 0) {
+      await transaction.query(
+        `DELETE FROM kb.review_items r
+          WHERE r.origin = 'ingestion' AND r.status = 'pending'
+            AND EXISTS (
+              SELECT 1 FROM kb.job_files f
+               WHERE f.job_id = $1
+                 AND (f.source_path = r.source_path OR f.source_name = r.source_name)
+            )`,
+        [jobId]
+      );
+      await transaction.query(
+        `UPDATE kb.job_files
+            SET status = 'queued', stage = 'queued', message_count = 0,
+                chunk_count = 0, embedded_chunks = 0, warning_count = 0,
+                error = NULL, started_at = NULL, finished_at = NULL,
+                updated_at = now()
+          WHERE job_id = $1`,
+        [jobId]
+      );
+    }
+
+    const updated = await transaction.query<{
+      id: number;
+      status: JobStatus;
+      mode: IngestionJobOptions['mode'];
+      engine_id: number | null;
+      technical_review_enabled: boolean;
+      enrichment_model: string | null;
+      embedding_model: string | null;
+    }>(
+      `UPDATE kb.ingestion_jobs
+          SET mode = $2,
+              engine_id = $3,
+              technical_review_enabled = $4,
+              enrichment_model = $5,
+              embedding_model = $6,
+              stage = 'queued', current_file = NULL, last_error = NULL,
+              processed_files = 0, skipped_files = 0, failed_files = 0,
+              total_messages = 0, total_chunks = 0, embedded_chunks = 0,
+              started_at = NULL, finished_at = NULL,
+              heartbeat_at = now(), updated_at = now()
+        WHERE id = $1
+        RETURNING id, status, mode, engine_id, technical_review_enabled,
+                  enrichment_model, embedding_model`,
+      [
+        jobId,
+        options.mode,
+        options.engineId,
+        options.technicalReviewEnabled,
+        options.mode === 'enriched' ? options.enrichmentModel : null,
+        options.mode === 'parse_only' ? null : options.embeddingModel,
+      ]
+    );
+    return updated.rows[0];
+  });
+}
+
+export async function deleteCancelledIngestionJob(jobId: number) {
+  const database = await getKnowledgeDatabase();
+  return database.transaction(async (transaction) => {
+    const job = await transaction.query<{ id: number }>(
+      `SELECT id FROM kb.ingestion_jobs
+        WHERE id = $1 AND status = 'cancelled'
+        FOR UPDATE`,
+      [jobId]
+    );
+    if (!job.rows[0]) {
+      throw new Error('Only a cancelled job can be permanently deleted.');
+    }
+
+    await transaction.query(
+      `DELETE FROM kb.review_items r
+        WHERE r.origin = 'ingestion' AND r.status = 'pending'
+          AND EXISTS (
+            SELECT 1 FROM kb.job_files f
+             WHERE f.job_id = $1
+               AND (f.source_path = r.source_path OR f.source_name = r.source_name)
+          )`,
+      [jobId]
+    );
+    const deleted = await transaction.query<{ id: number }>(
+      `DELETE FROM kb.ingestion_jobs WHERE id = $1 RETURNING id`,
+      [jobId]
+    );
+    return { id: deleted.rows[0].id, deleted: true };
+  });
+}
+
 export async function getKnowledgeOverview() {
   const database = await getKnowledgeDatabase();
   const config = getKnowledgeConfig();
-  const [countsResult, jobsResult, sourcesResult, jobFilesResult] =
-    await Promise.all([
-      database.query<{
-        sources: number;
-        messages: number;
-        chunks: number;
-        embedded_chunks: number;
-        active_jobs: number;
-      }>(`SELECT
+  const [
+    countsResult,
+    jobsResult,
+    sourcesResult,
+    jobFilesResult,
+    enginesResult,
+  ] = await Promise.all([
+    database.query<{
+      sources: number;
+      messages: number;
+      chunks: number;
+      embedded_chunks: number;
+      active_jobs: number;
+    }>(`SELECT
       (SELECT count(*)::integer FROM kb.sources WHERE status <> 'obsolete') AS sources,
       (SELECT count(*)::integer FROM kb.messages) AS messages,
       (SELECT count(*)::integer FROM kb.chunks) AS chunks,
       (SELECT count(*)::integer FROM kb.chunks WHERE embedding IS NOT NULL) AS embedded_chunks,
       (SELECT count(*)::integer FROM kb.ingestion_jobs
         WHERE status IN ('queued', 'running', 'paused')) AS active_jobs`),
-      database.query<Record<string, unknown> & { id: string }>(
-        `SELECT id::text, status, stage, mode, source_path, enrichment_model,
-              embedding_model, total_files, processed_files, skipped_files,
-              failed_files, total_messages, total_chunks, embedded_chunks,
-              current_file, last_error, chunk_target_tokens, chunk_overlap_tokens,
-              created_at, heartbeat_at, finished_at
-       FROM kb.ingestion_jobs ORDER BY created_at DESC LIMIT 20`
-      ),
-      database.query<Record<string, unknown> & { id: string }>(
-        `SELECT id::text, source_name, source_path, sha256, byte_size, status,
+    database.query<Record<string, unknown> & { id: string }>(
+      `SELECT j.id::text, j.status, j.stage, j.mode, j.source_path,
+              j.engine_id::text, e.name AS engine_name,
+              j.technical_review_enabled, j.enrichment_model,
+              j.embedding_model, j.total_files, j.processed_files, j.skipped_files,
+              j.failed_files, j.total_messages, j.total_chunks, j.embedded_chunks,
+              j.current_file, j.last_error, j.chunk_target_tokens,
+              j.chunk_overlap_tokens, j.created_at, j.heartbeat_at, j.finished_at,
+              (SELECT count(DISTINCT r.id)::integer
+               FROM kb.review_items r
+               JOIN kb.job_files rf ON rf.job_id = j.id
+                 AND (rf.source_path = r.source_path OR rf.source_name = r.source_name)
+              ) AS review_count,
+              (SELECT count(DISTINCT r.id)::integer
+               FROM kb.review_items r
+               JOIN kb.job_files rf ON rf.job_id = j.id
+                 AND (rf.source_path = r.source_path OR rf.source_name = r.source_name)
+               WHERE r.status = 'pending'
+              ) AS pending_review_count
+       FROM kb.ingestion_jobs j
+       LEFT JOIN kb.engines e ON e.id = j.engine_id
+       ORDER BY j.created_at DESC LIMIT 20`
+    ),
+    database.query<Record<string, unknown> & { id: string }>(
+      `SELECT id::text, source_name, source_path, sha256, byte_size, status,
               message_count, chunk_count, warning_count, modified_at, updated_at,
               metadata
        FROM kb.sources ORDER BY updated_at DESC LIMIT 100`
-      ),
-      database.query<Record<string, unknown> & { job_id: string }>(
-        `SELECT f.id::text, f.job_id::text, f.source_name, f.status, f.stage,
+    ),
+    database.query<Record<string, unknown> & { job_id: string }>(
+      `SELECT f.id::text, f.job_id::text, f.source_name, f.byte_size, f.status, f.stage,
               f.message_count, f.chunk_count, f.embedded_chunks, f.warning_count,
               f.error
        FROM kb.job_files f
@@ -918,14 +1303,18 @@ export async function getKnowledgeOverview() {
          SELECT id FROM kb.ingestion_jobs ORDER BY created_at DESC LIMIT 20
        ) recent ON recent.id = f.job_id
        ORDER BY f.job_id DESC, f.id`
-      ),
-    ]);
+    ),
+    database.query<Record<string, unknown>>(
+      `SELECT id::text, name, enabled, system_key
+         FROM kb.engines ORDER BY (system_key IS NULL), created_at, id`
+    ),
+  ]);
   const counts = countsResult.rows[0];
   return {
     database: {
-      engine: 'PGlite / PostgreSQL with pgvector',
-      path: config.databasePath,
-      portableTarget: 'Supabase PostgreSQL',
+      engine: process.env.APP_DATABASE_MODE === 'neon' ? 'Neon PostgreSQL with pgvector' : 'PGlite / PostgreSQL with pgvector',
+      path: process.env.APP_DATABASE_MODE === 'neon' ? 'Hosted workspace' : config.databasePath,
+      portableTarget: process.env.APP_DATABASE_MODE === 'neon' ? 'Neon PostgreSQL' : 'Supabase PostgreSQL',
       openAIConfigured: hasOpenAIKey(),
     },
     counts: {
@@ -942,6 +1331,7 @@ export async function getKnowledgeOverview() {
       ),
     })),
     sources: sourcesResult.rows,
+    engines: enginesResult.rows,
     defaults: {
       sourcePath: config.defaultSourcePath,
       enrichmentModel: config.enrichmentModel,

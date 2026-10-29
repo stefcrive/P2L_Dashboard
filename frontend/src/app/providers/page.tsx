@@ -1,5 +1,5 @@
-import { ProvidersDashboard } from '@/components/operations/providers-dashboard';
+import { ProvidersDirectory } from '@/components/operations/providers-dashboard';
 
 export default function ProvidersPage() {
-  return <ProvidersDashboard />;
+  return <ProvidersDirectory />;
 }

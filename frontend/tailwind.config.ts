@@ -7,6 +7,19 @@ const config: Config = {
     './src/components/**/*.{js,ts,jsx,tsx,mdx}',
     './src/app/**/*.{js,ts,jsx,tsx,mdx}',
   ],
+  safelist: [
+    'bg-violet-700',
+    'bg-sky-700',
+    'bg-indigo-700',
+    'bg-emerald-700',
+    'bg-amber-700',
+    'bg-cyan-700',
+    'bg-rose-700',
+    'bg-teal-700',
+    'bg-blue-700',
+    'bg-orange-700',
+    'bg-slate-700',
+  ],
   theme: {
     container: {
       center: true,
@@ -16,7 +29,13 @@ const config: Config = {
       },
     },
     extend: {
+      spacing: {
+        workspace: 'var(--panel-gap)',
+        panel: 'var(--panel-padding)',
+        control: 'var(--control-height)',
+      },
       colors: {
+        sky: { 50: '#F0F2FF', 100: '#E9E6FC', 200: '#D8D2F7', 300: '#B9AFF0', 400: '#9284E7', 500: '#6852DC', 600: '#4934CB', 700: '#402BB2', 800: '#35278B', 900: '#2C245E', 950: '#1D193C' },
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',
@@ -57,13 +76,13 @@ const config: Config = {
       },
       fontFamily: {
         sans: ['var(--font-body)', '"Segoe UI"', 'sans-serif'],
-        display: ['var(--font-display)', '"Segoe UI"', 'sans-serif'],
+        display: ['var(--font-body)', '"Segoe UI"', 'sans-serif'],
         mono: ['var(--font-geist-mono)', 'ui-monospace', 'monospace'],
       },
       borderRadius: {
         lg: 'var(--radius)',
-        md: 'calc(var(--radius) - 2px)',
-        sm: 'calc(var(--radius) - 4px)',
+        md: 'var(--radius)',
+        sm: 'calc(var(--radius) - 2px)',
       },
       keyframes: {
         'accordion-down': {

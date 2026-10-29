@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { readUploadForm } from '@/lib/cloud/upload-form';
 
 import {
   MAX_CLIENT_DOCUMENT_BYTES,
@@ -61,7 +62,14 @@ const entitySchema = {
 
 const deletableEntitySchema = {
   type: 'string',
-  enum: ['client', 'document', 'credit_event', 'material', 'lab_entry'],
+  enum: [
+    'client',
+    'document',
+    'credit_event',
+    'material',
+    'lab_entry',
+    'queue_item',
+  ],
 };
 
 const tools = [
@@ -122,7 +130,7 @@ const tools = [
     type: 'function',
     name: 'update_record_fields',
     description:
-      'Update allowed fields on one existing record. Call only when the user explicitly asks to change stored data. Never infer permission from a question or report request.',
+      'Update allowed fields on one existing record, including sample queue status, priority, position, ownership, and analysis dates. Queue changes automatically synchronize to the linked lab-book entry. Call only when the user explicitly asks to change stored data.',
     parameters: {
       type: 'object',
       properties: {
@@ -142,7 +150,7 @@ const tools = [
     type: 'function',
     name: 'create_record',
     description:
-      'Create a supported operational record, including a client, credit ledger event, inventory material, or lab-book entry. Call only when the user explicitly asks to add or record information.',
+      'Create a supported operational record, including a client, credit ledger event, inventory material, lab-book entry, or sample queue item. A queue_item requires sample_label, sample_count, and analysis_type; its analysis window is estimated automatically unless explicit dates are supplied. Call only when the user explicitly asks to add or record information.',
     parameters: {
       type: 'object',
       properties: {
@@ -161,7 +169,7 @@ const tools = [
     type: 'function',
     name: 'delete_record',
     description:
-      'Remove one client, client document record, credit ledger event, inventory material, or lab-book entry by id. This deletes database records only and never deletes document files from disk. Call only on an explicit, unambiguous removal request.',
+      'Remove one supported record by id, including a sample queue item. Removing a queue item also removes its linked lab-book schedule and annexed queue files. Other document deletions remove database records only and never delete source documents from disk. Call only on an explicit, unambiguous removal request.',
     parameters: {
       type: 'object',
       properties: {
@@ -169,6 +177,142 @@ const tools = [
         id: { type: 'string' },
       },
       required: ['entity', 'id'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: 'function',
+    name: 'get_queue_schedule',
+    description:
+      'Inspect the queue as ordered run-level calendar data. Returns parent queue metadata, every split run id and run_position, sample-derived working-day duration, monthly calendar distribution, future sequence, gaps, overlaps, holiday/weekend validation, and whether runway order matches calendar order. Use before explaining or manipulating queue distribution.',
+    parameters: {
+      type: 'object',
+      properties: {
+        scope: {
+          type: 'string',
+          enum: ['active', 'future', 'all'],
+          description:
+            'active includes queued/analysing runs, future includes only future queued/analysing runs, and all includes past completed runs too.',
+        },
+        from_date: {
+          type: 'string',
+          description: 'Optional inclusive calendar start date in YYYY-MM-DD format.',
+        },
+        to_date: {
+          type: 'string',
+          description: 'Optional inclusive calendar end date in YYYY-MM-DD format.',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'set_queue_item_runs',
+    description:
+      'Replace the complete run-segment list for one queue item. Use to split a queue item, resume it later, move or resize its individual calendar runs, or merge split runs. Existing run ids preserve those runs; omit an old run to remove it. Dates must start and end on working days and runs cannot overlap. Call only when the user explicitly requests the change.',
+    parameters: {
+      type: 'object',
+      properties: {
+        queue_item_id: { type: 'string' },
+        runs: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'object',
+            properties: {
+              id: {
+                type: 'string',
+                description:
+                  'Existing run id from get_queue_schedule. Omit only for a newly added split run.',
+              },
+              start_at: {
+                type: 'string',
+                description: 'Working-day start date or ISO timestamp.',
+              },
+              end_at: {
+                type: 'string',
+                description: 'Working-day end date or ISO timestamp.',
+              },
+              run_position: {
+                type: 'number',
+                description:
+                  'Optional runway position for a new or existing run. Use move_queue_run for simple list reordering.',
+              },
+            },
+            required: ['start_at', 'end_at'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['queue_item_id', 'runs'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'move_queue_run',
+    description:
+      'Move one queue run before or after another run in the runway list. This operates on run ids, so split runs can be interleaved with other queue items. Set plan_calendar true only when the user also wants future calendar dates recalculated immediately.',
+    parameters: {
+      type: 'object',
+      properties: {
+        run_id: { type: 'string' },
+        target_run_id: { type: 'string' },
+        placement: { type: 'string', enum: ['before', 'after'] },
+        plan_calendar: {
+          type: 'boolean',
+          description:
+            'When true, also distribute future runs in the new runway order. Past/current runs remain fixed.',
+        },
+      },
+      required: ['run_id', 'target_run_id', 'placement', 'plan_calendar'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: 'function',
+    name: 'move_queue_runs',
+    description:
+      'Apply multiple related runway moves atomically, then optionally plan the calendar once. Prefer this over repeated move_queue_run calls when the user asks to swap, replace, promote, demote, or move two or more queue runs. Resolve run ids with get_queue_schedule first.',
+    parameters: {
+      type: 'object',
+      properties: {
+        moves: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'object',
+            properties: {
+              run_id: { type: 'string' },
+              target_run_id: { type: 'string' },
+              placement: { type: 'string', enum: ['before', 'after'] },
+            },
+            required: ['run_id', 'target_run_id', 'placement'],
+            additionalProperties: false,
+          },
+        },
+        plan_calendar: {
+          type: 'boolean',
+          description:
+            'When true, recalculate future dates once after all moves are applied.',
+        },
+      },
+      required: ['moves', 'plan_calendar'],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: 'function',
+    name: 'plan_queue_calendar',
+    description:
+      'Apply Plan on calendar: recalculate future active queue runs in run_position order using ceil(sample_count / samples_per_week * 5) working days, preserve runs that start today or earlier, avoid weekends and Brazil/Sao Paulo laboratory holidays, and produce a validated calendar distribution. Call only when the user explicitly asks to plan, distribute, or recalculate the future queue calendar.',
+    parameters: {
+      type: 'object',
+      properties: {},
       additionalProperties: false,
     },
     strict: true,
@@ -366,7 +510,7 @@ const tools = [
 
 const instructions = `You are the P2L laboratory operations assistant embedded in its management platform.
 
-You can retrieve platform data, inspect related records, update all editable client fields, create and remove supported records, attach uploaded files to clients, import uploaded result workbooks, annex existing document files, adjust stock, work with a connected Gmail mailbox, and produce Markdown reports.
+You can retrieve platform data, inspect related records, manage the sample queue, update all editable client fields, create and remove supported records, attach uploaded files to clients, import uploaded result workbooks, annex existing document files, adjust stock, work with a connected Gmail mailbox, and produce Markdown reports.
 
 Operating rules:
 - Answer from tool results, never from invented platform facts.
@@ -379,6 +523,13 @@ Operating rules:
 - Use import_uploaded_result_file when the user asks to import an uploaded Excel result workbook. It attaches the workbook and imports measurements together. After the user resolves any ambiguity and says to proceed, complete the import without asking them to reattach the file.
 - User-attached images and files are primary context for the current request. Inspect them directly, distinguish their contents from platform records, and mention when a requested fact is not visible or extractable.
 - Use adjust_material_stock for stock changes so movements are logged. Creating or removing an inventory material uses create_record or delete_record.
+- The queue has two levels: a queue item is the sample batch; its one or more runs are the individually ordered and scheduled calendar segments. Split runs retain the same queue_item_id and can be interleaved with runs from other items.
+- Use get_queue_schedule before explaining queue distribution or performing run-level changes. Treat run_position as the runway sequence and start_at/end_at as the calendar allocation. Use its validation and calendar_distribution instead of inferring from parent estimated dates alone.
+- Use the queue_item entity to add, edit, reprioritize, change sample_count or samples_per_week, change status, assign an instrument/operator, or remove sample queue records. Queue writes automatically synchronize their linked lab-book schedule; do not create a second lab_entry for the same queue work.
+- Use set_queue_item_runs to split, merge, interrupt/resume, move, or resize one item's calendar runs. It replaces that item's complete run list, so first retrieve existing run ids and include every run that should remain. Do not use update_record_fields with a partial segments array.
+- Use move_queue_run for one runway move and move_queue_runs for a swap or any request involving multiple runs. Prefer the batch tool so all list changes are applied atomically and the calendar is planned at most once. Runs, not parent items, are the sortable units. Reordering alone changes sequence but not dates. Set plan_calendar true or separately use plan_queue_calendar only when the user asks to recalculate the future calendar.
+- plan_queue_calendar affects only active runs whose start is after today. It follows run_position globally, assigns the item duration ceil(sample_count / samples_per_week * 5) across its runs, preserves past/current runs, and skips weekends plus Brazil/Sao Paulo laboratory holidays. It places future runs sequentially without overlap.
+- A new queue_item requires sample_label, sample_count, and analysis_type. If the user does not provide an analysis window, let the queue calculate it from current capacity and method throughput. Use estimated_start_at and estimated_end_at only when the user explicitly supplies or requests different dates.
 - Gmail search and reading are read-only. Use Gmail only when the user asks for an email task; do not inspect their mailbox speculatively.
 - Use create_gmail_draft when the user asks to write, compose, prepare, or draft an email. Creating a draft does not require send permission from the user.
 - Use send_gmail_email only when the user explicitly asks to send and the recipients, subject, and final body are unambiguous. Never treat a request to write or draft as permission to send. After sending, state the recipients and subject.
@@ -439,6 +590,29 @@ function normalizeMessages(values: unknown[]) {
   }));
 }
 
+function normalizeKnowledgeEngineIds(value: unknown) {
+  let parsed = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value) as unknown;
+    } catch {
+      parsed = [];
+    }
+  }
+  if (!Array.isArray(parsed)) return undefined;
+  return Array.from(
+    new Set(
+      parsed
+        .map(Number)
+        .filter((id) => Number.isSafeInteger(id) && id > 0)
+    )
+  ).slice(0, 50);
+}
+
+function normalizeThinking(value: unknown) {
+  return value === true || value === 'true';
+}
+
 function decodeBytea(value: unknown): Uint8Array | null {
   if (value instanceof Uint8Array) return value;
   if (typeof value === 'string' && value.startsWith('\\x')) {
@@ -467,8 +641,8 @@ function fileInputPart(name: string, type: string, bytes: Uint8Array) {
 
 async function readRequest(request: Request) {
   const contentType = request.headers.get('content-type') ?? '';
-  if (contentType.includes('multipart/form-data')) {
-    const formData = await request.formData();
+  if (contentType.includes('multipart/form-data') || request.headers.get('x-p2l-direct-upload') === '1') {
+    const formData = await readUploadForm(request);
     let rawMessages: unknown[] = [];
     try {
       const parsed = JSON.parse(String(formData.get('messages') ?? '[]')) as unknown;
@@ -478,6 +652,10 @@ async function readRequest(request: Request) {
     }
     return {
       messages: normalizeMessages(rawMessages),
+      knowledgeEngineIds: normalizeKnowledgeEngineIds(
+        formData.get('knowledgeEngineIds')
+      ),
+      thinking: normalizeThinking(formData.get('thinking')),
       files: formData
         .getAll('files')
         .filter((value): value is File => value instanceof File && value.size > 0),
@@ -485,10 +663,14 @@ async function readRequest(request: Request) {
   }
 
   const body = (await request.json().catch(() => null)) as
-    | { messages?: unknown[] }
+    | { messages?: unknown[]; knowledgeEngineIds?: unknown; thinking?: unknown }
     | null;
   return {
     messages: normalizeMessages(body?.messages ?? []),
+    knowledgeEngineIds: normalizeKnowledgeEngineIds(
+      body?.knowledgeEngineIds
+    ),
+    thinking: normalizeThinking(body?.thinking),
     files: [] as File[],
   };
 }
@@ -602,6 +784,8 @@ function extractText(response: OpenAIResponse): string {
 }
 
 const MAX_TOOL_OUTPUT_CHARACTERS = 500_000;
+const MAX_PLATFORM_TOOL_TURNS = 6;
+const MODEL_REQUEST_TIMEOUT_MS = 60_000;
 
 function compactToolValue(value: unknown, depth = 0): unknown {
   if (depth > 8) return '[nested data omitted]';
@@ -641,7 +825,10 @@ function serializeToolOutput(value: unknown): string {
   });
 }
 
-async function createResponse(body: Record<string, unknown>): Promise<OpenAIResponse> {
+async function createResponse(
+  body: Record<string, unknown>,
+  requestSignal?: AbortSignal
+): Promise<OpenAIResponse> {
   const apiKey = getWorkspaceEnvironmentValue('OPENAI_API_KEY');
   if (!apiKey) {
     throw new Error(
@@ -649,15 +836,32 @@ async function createResponse(body: Record<string, unknown>): Promise<OpenAIResp
     );
   }
 
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-    cache: 'no-store',
-  });
+  let response: Response;
+  try {
+    const timeoutSignal = AbortSignal.timeout(MODEL_REQUEST_TIMEOUT_MS);
+    response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+      signal: requestSignal
+        ? AbortSignal.any([requestSignal, timeoutSignal])
+        : timeoutSignal,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.name === 'AbortError' || error.name === 'TimeoutError')
+    ) {
+      throw new Error(
+        'The assistant model request timed out. No further queue actions were attempted; please retry.'
+      );
+    }
+    throw error;
+  }
   const payload = (await response.json().catch(() => null)) as OpenAIResponse | null;
   if (!response.ok || !payload) {
     const message =
@@ -670,7 +874,8 @@ async function createResponse(body: Record<string, unknown>): Promise<OpenAIResp
 export async function POST(request: Request) {
   let responseAttachments: ChatAttachment[] = [];
   try {
-    const { messages, files } = await readRequest(request);
+    const { messages, files, knowledgeEngineIds, thinking } =
+      await readRequest(request);
     if (!messages.length || messages[messages.length - 1].role !== 'user') {
       return NextResponse.json(
         { error: 'A user message is required.' },
@@ -747,10 +952,25 @@ export async function POST(request: Request) {
           { status: 400 }
         );
       }
-      const result = await answerKnowledgeQuestion({ question, rerank: true });
+      if (knowledgeEngineIds !== undefined && !knowledgeEngineIds.length) {
+        return NextResponse.json(
+          { error: 'Select at least one active knowledge engine.' },
+          { status: 400 }
+        );
+      }
+      const result = await answerKnowledgeQuestion({
+        question,
+        rerank: true,
+        engineIds: knowledgeEngineIds,
+        thinking,
+      });
       const sources = result.evidence.map(
         (item) =>
-          `- **[KB:${item.chunkId}]** ${item.sourceName}, lines ${item.startLine}–${item.endLine}${
+          `- **[KB:${item.chunkId}]** ${item.sourceName}, ${
+            item.visual
+              ? `${item.visual.kind} on page ${item.visual.pageNumber}`
+              : `lines ${item.startLine}–${item.endLine}`
+          }${
             item.subject ? ` — ${item.subject}` : ''
           }`
       );
@@ -760,6 +980,9 @@ export async function POST(request: Request) {
       return NextResponse.json({
         message,
         mode: 'knowledge',
+        evidence: result.evidence,
+        trace: result.trace,
+        knowledgeEngineIds: knowledgeEngineIds ?? null,
         attachments: responseAttachments,
       });
     }
@@ -772,9 +995,9 @@ export async function POST(request: Request) {
       tools,
       reasoning: { effort: 'medium', context: 'all_turns' },
       text: { verbosity: 'medium' },
-    });
+    }, request.signal);
 
-    for (let turn = 0; turn < 10; turn += 1) {
+    for (let turn = 0; turn < MAX_PLATFORM_TOOL_TURNS; turn += 1) {
       const calls = (response.output ?? []).filter(
         (item): item is FunctionCall => item.type === 'function_call'
       );
@@ -796,15 +1019,28 @@ export async function POST(request: Request) {
         });
       }
 
-      response = await createResponse({
-        model,
-        instructions,
-        previous_response_id: response.id,
-        input: outputs,
-        tools,
-        reasoning: { effort: 'medium', context: 'all_turns' },
-        text: { verbosity: 'medium' },
-      });
+      const lastToolTurn = turn === MAX_PLATFORM_TOOL_TURNS - 1;
+      response = await createResponse(
+        lastToolTurn
+          ? {
+              model,
+              instructions: `${instructions}\n\nThe platform tool-turn limit has been reached. Provide the final user-facing response now from the completed tool results. Do not request another tool call.`,
+              previous_response_id: response.id,
+              input: outputs,
+              reasoning: { effort: 'low', context: 'all_turns' },
+              text: { verbosity: 'medium' },
+            }
+          : {
+              model,
+              instructions,
+              previous_response_id: response.id,
+              input: outputs,
+              tools,
+              reasoning: { effort: 'medium', context: 'all_turns' },
+              text: { verbosity: 'medium' },
+            },
+        request.signal
+      );
     }
 
     let message = extractText(response);
@@ -826,7 +1062,7 @@ export async function POST(request: Request) {
         ],
         reasoning: { effort: 'low', context: 'all_turns' },
         text: { verbosity: 'medium' },
-      });
+      }, request.signal);
       message = extractText(response);
     }
     if (!message) {

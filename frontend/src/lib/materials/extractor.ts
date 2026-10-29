@@ -19,6 +19,7 @@ const xlsxWithFs = XLSX as typeof XLSX & {
 xlsxWithFs.set_fs?.(nodeFs);
 
 const SUPPORTED_EXTENSIONS = new Set(['.csv', '.xlsx', '.xls']);
+const EXCLUDED_SOURCE_FILES = new Set(['spares&consumables bremen.xlsx']);
 
 type CanonicalColumn =
   | 'item'
@@ -124,12 +125,126 @@ function isOrdinalItem(value: string): boolean {
   return /^\s*\d{1,3}\s*[.)-]?\s*$/.test(value);
 }
 
-function formatMaterialName(value: string): string {
-  const cleaned = value
-    .replace(/^["']+|["']+$/g, '')
-    .replace(/\s*([,;/])\s*/g, '$1 ')
+function canonicalPartKey(value: string | null): string {
+  const key = normalizeText(value ?? '').replace(/[^a-z0-9]+/g, '');
+  const normalized = /^\d+$/.test(key) ? key.replace(/^0+(?=\d)/, '') : key;
+  return normalized === '754960' || normalized.includes('bre0000957')
+    ? 'bre0000957'
+    : normalized;
+}
+
+const CANONICAL_NAME_BY_PART = new Map<string, string>([
+  ['453750', 'Nylon screw, ISO 1207 M3 × 6'],
+  ['520910', 'Front ferrule, 1/16 in tube OD'],
+  ['520940', 'Rear ferrule, 1/16 in stainless steel'],
+  ['545270', 'Gold gasket, OD38 × ID36.5'],
+  ['551600', 'Gold gasket, OD117 × ID115'],
+  ['553140', 'Sealing-ring set'],
+  ['554440', 'Viton O-ring, 12.37 × 2.62 mm'],
+  ['598671', 'PTFE gasket, 11.9 × 9 × 0.25 mm (pack of 3)'],
+  ['653010', 'Complete membrane assembly'],
+  ['653030', 'Piston'],
+  ['653041', 'Gold seal tip, 3.9 mm'],
+  ['672460', 'Tungsten filament'],
+  ['754960', 'Sample vial, KS 19/9 × 50 mm'],
+  ['783900', 'Quartz tube, 4 × 2 × 23 mm'],
+  ['79622', 'Phosphoric acid, ≥99% (crystalline)'],
+  ['79622500g', 'Phosphoric acid, ≥99% (crystalline)'],
+  ['208256', 'Stannous chloride (200 g pack)'],
+  ['208256100g', 'Stannous chloride (100 g pack)'],
+  ['265640', 'Tin (Sn) (200 g pack)'],
+  ['265640100g', 'Tin (Sn) (100 g pack)'],
+  ['339741', 'Sulphuric acid, 99% (200 mL pack)'],
+  ['339741100ml', 'Sulphuric acid, 99% (100 mL pack)'],
+  ['214701500g', 'Phosphorus pentoxide, ≥99%'],
+  ['1097570', 'PEEK tube, 1/16 in OD × 0.040 in ID'],
+  ['1157670', 'Stainless-steel frit, 1/4 in OD × 1/32 in'],
+  ['1220110', 'Halogen lamp, 20 W / 12 V (Osram)'],
+  ['1275730', 'HiPace 300 operating-fluid reservoir'],
+  ['1275740', 'HiPace 80 operating-fluid reservoir'],
+  ['1283450', 'Acid drop counter'],
+  ['1298080', 'Shut-off valve P-732'],
+  ['1298090', 'No-twist fitting, 1/16 in PEEK (ZNF1PK)'],
+  ['1298140', 'Long acid capillary'],
+  ['1298170', 'Short flangeless nut XP-235'],
+  ['1298180', 'Flangeless ferrule P-200'],
+  ['1309920', 'Kiel IV new acid-valve spare set'],
+  ['1322930', 'MAT 253 Plus spare-parts set'],
+  ['bre0000957', 'Sample vial, KS 19/9 × 50 mm'],
+  ['bre0010679', 'Kiel IV acid-supply maintenance kit'],
+]);
+
+function canonicalTextKey(value: string): string {
+  return normalizeText(value)
+    .replace(/×/g, 'x')
+    .replace(/[^a-z0-9%]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+const CANONICAL_NAME_BY_TEXT = new Map<string, string>([
+  ['ferrule swg back 1/16 ss', 'Rear ferrule, 1/16 in stainless steel'],
+  ['front ferrule tube o.d. 1/16', 'Front ferrule, 1/16 in tube OD'],
+  ['frit 1/4 o.d. x 1/32 stainless steel', 'Stainless-steel frit, 1/4 in OD × 1/32 in'],
+  ['no twist fitting 1/16 peek znf1pk', 'No-twist fitting, 1/16 in PEEK (ZNF1PK)'],
+  ['o-ring 12.37 x 2.62 viton', 'Viton O-ring, 12.37 × 2.62 mm'],
+  ['tube peek 1/16 x0.04', 'PEEK tube, 1/16 in OD × 0.040 in ID'],
+  ['sample vial ks 19/9- 50 lg', 'Sample vial, KS 19/9 × 50 mm'],
+  ['abastecimentos de ln2 (21600 litros)', 'Liquid nitrogen supply (21,600 L)'],
+  ['nitrogenio liquido (21600 litros)', 'Liquid nitrogen supply (21,600 L)'],
+  ['acido nitrico 70% pa acs', 'Nitric acid, 70%, ACS grade'],
+  ['acido oxalico 2h20 pa acs', 'Oxalic acid dihydrate, ACS grade'],
+  ['adesivos loctite 416', 'Loctite 416 adhesive'],
+  ['gas argonio', 'High-purity argon gas'],
+  ['gas co2 ultrapuro', 'Ultra-high-purity CO2 gas'],
+  ['gas helio ultrapuro 99.999%', 'Ultra-high-purity helium gas (99.999%)'],
+  ['tubo pu 4 0 x 2 5 azul', 'Blue PU tube, 4.0 × 2.5 mm'],
+  ['tubo pu 6 0 x 4 0 azul', 'Blue PU tube, 6.0 × 4.0 mm'],
+  ['chloridric acid 37%', 'Hydrochloric acid, 37%'],
+  ['graxa silicone', 'Silicone grease'],
+  ['vermiculita', 'Vermiculite'],
+  ['silicone 5966 grey henkel henkel', 'Henkel Loctite SI 5966 grey silicone sealant'],
+  ['macarico manual vonder para gas mapp', 'Vonder hand torch for MAPP gas'],
+  ['refil para macarico gas mapp 400g', 'MAPP gas refill (400 g)'],
+  ['co2 ultrapura (comparavel com o butijao que ja temos conectado na frente do mat253)', 'Ultra-high-purity CO2 gas'],
+  ['gas co2 ultrapuro (comparavel com o butijao que ja temos conectado na frente do mat253)', 'Ultra-high-purity CO2 gas'],
+  ['gas argon (comparavel com butijao marrom azul que ja temos)', 'High-purity argon gas'],
+  ['spare parts dual inlet', 'MAT 253 Plus dual-inlet spare-parts set'],
+  ['spare parts dual inlet (hipace ab 03 12)', 'MAT 253 Plus dual-inlet spare-parts set'],
+].map(([key, value]) => [canonicalTextKey(key), value]));
+
+function cleanMaterialText(value: string): string {
+  return value
+    .replace(/\u00a0/g, ' ')
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/\s+-\s+R\$\s*[\d.,]+\s*$/i, '')
+    .replace(/^\s*["']+|["']+\s*$/g, '')
+    .replace(/"{2,}/g, '"')
+    .replace(/\(\/\)/g, '')
+    .replace(/(\d)\s*"/g, '$1 in')
+    .replace(/["']/g, '')
+    .replace(/\s*([,;/])\s*/g, '$1 ')
+    .replace(/\s+[xX]\s+/g, ' × ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formatMaterialName(value: string, partNumber: string | null = null): string {
+  const canonicalByPart = CANONICAL_NAME_BY_PART.get(canonicalPartKey(partNumber));
+  if (canonicalByPart) return canonicalByPart;
+
+  const rawCleaned = cleanMaterialText(value);
+  const textKey = canonicalTextKey(rawCleaned);
+  const canonicalByText = CANONICAL_NAME_BY_TEXT.get(textKey);
+  if (canonicalByText) return canonicalByText;
+  if (textKey.startsWith('acido fosforico puriss')) {
+    return 'Phosphoric acid, ≥99% (crystalline)';
+  }
+  if (textKey.startsWith('pentoxido fosforico')) {
+    return 'Phosphorus pentoxide, ≥99%';
+  }
+
+  const cleaned = rawCleaned;
   if (!cleaned) return cleaned;
   const letters = cleaned.match(/[a-z]/gi) ?? [];
   const uppercaseLetters = letters.filter(
@@ -166,6 +281,45 @@ function formatMaterialName(value: string): string {
       return word.charAt(0).toUpperCase() + word.slice(1);
     })
     .join(' ');
+}
+
+function isReadableMaterialName(value: string): boolean {
+  const normalized = normalizeText(value);
+  if (!normalized || isOrdinalItem(normalized)) return false;
+  if (/^(?:item|material|description|descricao|n\/?a|none|null)$/.test(normalized)) {
+    return false;
+  }
+  const letters = normalized.match(/[a-z]/g) ?? [];
+  return letters.length >= 3;
+}
+
+function looksLikeQuantityValue(value: string): boolean {
+  return /^\s*\d+(?:[.,]\d+)?\s*(?:kg|g|mg|ml|l|mq|m³|m2|m3|m|mt|un|unit|units|unidade|unidades|pc|pcs)?(?:\s*\([^)]*\))?\s*$/i.test(
+    value
+  );
+}
+
+function looksLikePartCode(value: string): boolean {
+  const compact = value.replace(/\s+/g, '').replace(/^['"]+|['"]+$/g, '');
+  if (!compact || /^https?:/i.test(compact)) return false;
+  if (/^\d{5,}$/.test(compact)) return true;
+  return compact.length >= 5 && /\d/.test(compact) && /[a-z/-]/i.test(compact);
+}
+
+function shouldSwapPartAndQuantity(partValue: string, quantityValue: string): boolean {
+  const compactPart = partValue.replace(/\s+/g, '');
+  const isLongNumericCode = /^\d{5,}(?:\.0+)?$/.test(compactPart);
+  return (
+    !isLongNumericCode &&
+    looksLikeQuantityValue(partValue) &&
+    looksLikePartCode(quantityValue)
+  );
+}
+
+function isNonMaterialService(value: string): boolean {
+  return /^(?:manutencao|manutencao|maintenance|servico|service|treinamento|training)\b/.test(
+    normalizeText(value)
+  );
 }
 
 function inferCurrency(fileName: string, sheetName: string | null): string {
@@ -315,6 +469,19 @@ function inferMaterialType(context: string): MaterialType {
     'tin ',
     'refil',
     'ln2',
+    'nitrogen',
+    'alcool',
+    'alcohol',
+    'acetona',
+    'ether',
+    'eter ',
+    'peptone',
+    'pentoxide',
+    'pentoxido',
+    'vermicul',
+    'sulfato',
+    'carbonato',
+    'diatomaceous',
     'loctite',
     'silicone',
     'adesivo',
@@ -347,17 +514,98 @@ function inferMaterialType(context: string): MaterialType {
 function inferEquipment(context: string): string {
   const normalized = normalizeText(context);
 
-  if (normalized.includes('kiel')) return 'Kiel IV';
-  if (normalized.includes('mat253') || normalized.includes('253 plus')) {
-    return 'MAT253 Plus';
+  if (
+    [
+      'kiel',
+      'carbodevice',
+      'acid capillary',
+      'acid drop',
+      'sample vial',
+      'membrane',
+      'piston',
+      'sealing ring',
+      'stamp-au-seal',
+    ].some((term) => normalized.includes(term))
+  ) {
+    return 'Kiel IV carbonate preparation device';
   }
-  if (normalized.includes('hipace 80')) return 'HiPace 80';
-  if (normalized.includes('hipace 300')) return 'HiPace 300';
-  if (normalized.includes('qtegra')) return 'Qtegra';
-  if (normalized.includes('irms')) return 'IRMS';
-  if (normalized.includes('petrobras')) return 'Petrobras project';
+  if (normalized.includes('mat253') || normalized.includes('253 plus')) {
+    return 'MAT 253 Plus isotope-ratio mass spectrometry system';
+  }
+  if (
+    [
+      'hipace',
+      'dual inlet',
+      'filament tungsten',
+      'tungsten filament',
+      'gasket gold od117',
+      'o-ring',
+      'halogenlamp',
+      'ferrule',
+      'frit',
+      'peek',
+      'flangeless nut',
+      'shut-off valve',
+    ].some((term) => normalized.includes(term))
+  ) {
+    return 'MAT 253 Plus isotope-ratio mass spectrometry system';
+  }
+  if (normalized.includes('qtegra')) return 'Qtegra instrument workstation';
+  if (normalized.includes('miele')) return 'Washing machine';
+  if (normalized.includes('compressor') || normalized.includes('ar comprimido')) {
+    return 'Air compressor';
+  }
+  if (normalized.includes('ar condicionado')) return 'Air conditioning';
 
-  return 'General Lab';
+  return 'General laboratory';
+}
+
+function inferDescription(
+  name: string,
+  materialType: MaterialType,
+  equipment: string
+): string | null {
+  if (materialType !== 'consumable' && materialType !== 'spare_part') return null;
+  const normalized = normalizeText(name);
+  if (normalized.includes('filament')) {
+    return 'Replacement tungsten filament for the MAT 253 Plus ion source.';
+  }
+  if (normalized.includes('sample vial')) {
+    return 'Reaction/sample vial sized for the Kiel IV carbonate preparation device.';
+  }
+  if (normalized.includes('acid capillary')) {
+    return 'Replacement capillary for the Kiel IV acid delivery path.';
+  }
+  if (normalized.includes('gasket') || normalized.includes('o-ring')) {
+    return 'Replacement vacuum seal for leak-tight isotope-analysis system connections.';
+  }
+  if (
+    normalized.includes('ferrule') ||
+    normalized.includes('fitting') ||
+    normalized.includes('nut')
+  ) {
+    return 'Replacement connector for small-bore gas or reagent tubing on the isotope-analysis system.';
+  }
+  if (normalized.includes('acid') || normalized.includes('acido')) {
+    return 'Laboratory-grade acid reagent or acid-path component for sample preparation.';
+  }
+  if (materialType === 'spare_part') {
+    return `Replacement part for preventive or corrective maintenance of ${equipment}.`;
+  }
+  return `Consumable used for ${equipment}.`;
+}
+
+function defaultSuggestedStock(name: string, materialType: MaterialType): number | null {
+  if (materialType === 'spare_part') {
+    const normalized = normalizeText(name);
+    return ['o-ring', 'ferrule', 'gasket', 'screw', 'seal', 'nut'].some((term) =>
+      normalized.includes(term)
+    )
+      ? 4
+      : 1;
+  }
+  if (materialType === 'consumable') return 2;
+  return null;
 }
 
 function buildNormalizedKey(
@@ -365,17 +613,14 @@ function buildNormalizedKey(
   name: string,
   description: string | null
 ): string {
-  const partKey = normalizeText(partNumber ?? '').replace(/[^a-z0-9]+/g, '');
-  const canonicalPartKey = /^\d+$/.test(partKey)
-    ? partKey.replace(/^0+(?=\d)/, '')
-    : partKey;
+  const partKey = canonicalPartKey(partNumber);
   const nameKey = normalizeText(name || description || '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 80);
 
-  return canonicalPartKey
-    ? `pn::${canonicalPartKey}`
+  return partKey
+    ? `pn::${partKey}`
     : `name::${nameKey || 'unnamed'}`;
 }
 
@@ -413,6 +658,10 @@ async function walkSpreadsheetFiles(directoryPath: string): Promise<string[]> {
     }
 
     if (!entry.isFile()) {
+      continue;
+    }
+
+    if (EXCLUDED_SOURCE_FILES.has(entry.name.toLowerCase())) {
       continue;
     }
 
@@ -467,26 +716,40 @@ function extractRowsFromSheet(
 
     const itemRaw = readCell(columnMap.item);
     const descriptionRaw = readCell(columnMap.description);
-    const partNumber = normalizePartNumber(readCell(columnMap.partNumber));
-    const quantityText = readCell(columnMap.quantity) || null;
+    let partNumberRaw = readCell(columnMap.partNumber);
+    let quantityTextRaw = readCell(columnMap.quantity);
+    if (shouldSwapPartAndQuantity(partNumberRaw, quantityTextRaw)) {
+      [partNumberRaw, quantityTextRaw] = [quantityTextRaw, partNumberRaw];
+    }
+    const partNumber = normalizePartNumber(partNumberRaw);
+    const quantityText = quantityTextRaw || null;
     const supplierReference = readCell(columnMap.reference) || null;
     const unitPrice = parseCurrency(readCell(columnMap.unitPrice));
     const totalPrice = parseCurrency(readCell(columnMap.totalPrice));
 
     const primaryName =
       !itemRaw || isOrdinalItem(itemRaw) ? descriptionRaw : itemRaw;
-    const name = formatMaterialName(primaryName || descriptionRaw || '');
+    const name = formatMaterialName(primaryName || descriptionRaw || '', partNumber);
     if (!name && !partNumber && !quantityText && !supplierReference) {
       continue;
     }
-    if (shouldIgnoreRow(name, descriptionRaw || null)) {
+    if (
+      !isReadableMaterialName(name) ||
+      isNonMaterialService(name) ||
+      shouldIgnoreRow(name, descriptionRaw || null)
+    ) {
       continue;
     }
 
+    const formattedDescription = descriptionRaw
+      ? formatMaterialName(descriptionRaw, partNumber)
+      : '';
     const description =
-      descriptionRaw && descriptionRaw !== name ? descriptionRaw : null;
+      formattedDescription && normalizeText(formattedDescription) !== normalizeText(name)
+        ? cleanMaterialText(descriptionRaw)
+        : null;
     const quantity = parseQuantity(quantityText ?? '');
-    const context = `${name} ${description ?? ''} ${fileName} ${sheetName ?? ''}`;
+    const context = `${name} ${description ?? ''} ${sheetName ?? ''}`;
     const materialType = inferMaterialType(context);
     const equipment = inferEquipment(context);
     const normalizedKey = buildNormalizedKey(partNumber, name, description);
@@ -495,11 +758,12 @@ function extractRowsFromSheet(
       normalizedKey,
       name,
       partNumber,
-      description,
+      description: description ?? inferDescription(name, materialType, equipment),
       materialType,
       equipment,
       quantityText,
-      suggestedStock: quantity.quantity,
+      suggestedStock:
+        quantity.quantity ?? defaultSuggestedStock(name, materialType),
       unit: quantity.unit,
       supplierReference,
       sourceFile: fileName,
@@ -516,18 +780,40 @@ function extractRowsFromSheet(
 
 function mergeMaterials(materials: ExtractedMaterial[]): ExtractedMaterial[] {
   const mergedByKey = new Map<string, ExtractedMaterial & { __priority: number }>();
+  const partKeysByName = new Map<string, Set<string>>();
 
   for (const material of materials) {
-    const key = material.normalizedKey;
+    if (!material.partNumber) continue;
+    const nameKey = normalizeText(material.name).replace(/[^a-z0-9]+/g, '');
+    const keys = partKeysByName.get(nameKey) ?? new Set<string>();
+    keys.add(material.normalizedKey);
+    partKeysByName.set(nameKey, keys);
+  }
+
+  for (const material of materials) {
+    const nameKey = normalizeText(material.name).replace(/[^a-z0-9]+/g, '');
+    const matchingPartKeys = partKeysByName.get(nameKey);
+    const key =
+      !material.partNumber && matchingPartKeys?.size === 1
+        ? Array.from(matchingPartKeys)[0]
+        : material.normalizedKey;
     const priority = sourcePriority(material.sourceFile);
     const current = mergedByKey.get(key);
 
     if (!current) {
-      mergedByKey.set(key, { ...material, __priority: priority });
+      mergedByKey.set(key, {
+        ...material,
+        normalizedKey: key,
+        __priority: priority,
+      });
       continue;
     }
 
-    const shouldReplacePrimaryFields = priority > current.__priority;
+    const currentNameQuality = isReadableMaterialName(current.name) ? 1 : 0;
+    const incomingNameQuality = isReadableMaterialName(material.name) ? 1 : 0;
+    const shouldReplacePrimaryFields =
+      incomingNameQuality > currentNameQuality ||
+      (incomingNameQuality === currentNameQuality && priority > current.__priority);
 
     if (shouldReplacePrimaryFields) {
       current.name = material.name;
@@ -582,6 +868,7 @@ function mergeMaterials(materials: ExtractedMaterial[]): ExtractedMaterial[] {
 
   return Array.from(mergedByKey.values())
     .map(({ __priority: _, ...material }) => material)
+    .filter((material) => isReadableMaterialName(material.name))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 

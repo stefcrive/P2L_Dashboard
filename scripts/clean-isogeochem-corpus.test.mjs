@@ -145,3 +145,26 @@ test('serialized records can be parsed again', () => {
   assert.equal(parsed[0].subjectNormalized, 'Delta XL heater connection');
   assert.match(parsed[0].cleanText, /12 V/);
 });
+
+test('phone masking does not consume vertical figure and table values', () => {
+  const figureValues = ['188', '172', '165', '158', '142', '130', '128', '119'];
+  const body = [
+    'the Raw page (Figure 3-81 and Figure 3-82).',
+    'Figure 3-81. Raw Page – Part I',
+    ...figureValues,
+    'Figure 3-82. Raw Page – Part II',
+    'Table 3-27. Explanations for the Columns of the Result File',
+    'Number Column Explanation',
+    'Phone: +1 (555) 123-4567',
+  ].join('\n');
+  const source = `${serializeRecord(message(), body)}\n`;
+
+  const [parsed] = parseMergedConversation(source);
+
+  assert.ok(parsed);
+  assert.match(parsed.cleanText, /Figure 3-81\. Raw Page – Part I/);
+  assert.ok(parsed.cleanText.includes(figureValues.join('\n')));
+  assert.match(parsed.cleanText, /Table 3-27\. Explanations/);
+  assert.doesNotMatch(parsed.cleanText, /555/);
+  assert.match(parsed.cleanText, /Phone: \[phone redacted\]/);
+});

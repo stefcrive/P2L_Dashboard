@@ -11,6 +11,7 @@ function cleanSearchValue(value: string | null) {
 }
 
 async function ensureInitialSync(request: Request) {
+  if (process.env.APP_DATABASE_MODE === 'neon') return null;
   const database = getSupabaseAdminClient();
   const { count, error } = await database
     .from('client_result_files')
@@ -22,6 +23,9 @@ async function ensureInitialSync(request: Request) {
     cache: 'no-store',
   });
   if (response.ok) return null;
+  if (response.status === 404) {
+    return 'The result import service is missing from this installation. Existing results remain available for viewing.';
+  }
   const payload = (await response.json().catch(() => null)) as
     | { error?: string }
     | null;

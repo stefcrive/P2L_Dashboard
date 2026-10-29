@@ -3,14 +3,16 @@ import { createHash } from 'node:crypto';
 import { extractDeterministicMetadata } from './taxonomy';
 import type { ParsedMessage } from './types';
 
-export const MERGED_CONVERSATION_PARSER_VERSION = 'merged_conversation_v2';
+export const MERGED_CONVERSATION_PARSER_VERSION = 'merged_conversation_v3';
 
 const MESSAGE_HEADER =
   /^Subject:([^\r\n]*)\r?\nAuthor:([^\r\n]*)\r?\nDate:([^\r\n]*)\r?\n={50}\r?$/gm;
 const TRAILING_SEPARATOR = /\r?\n={50}\s*$/;
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+// Keep phone candidates on one physical line. `\s` also matches newlines and
+// caused vertical runs of figure/table values to be removed as one phone number.
 const PHONE_PATTERN =
-  /(?<!\d)(?:\+?\d[\s().-]*)?(?:\d[\s().-]*){7,14}\d(?!\d)/g;
+  /(?<!\d)(?:\+?\d[ \t().-]*)?(?:\d[ \t().-]*){7,14}\d(?!\d)/g;
 
 function sha256(value: string) {
   return createHash('sha256').update(value).digest('hex');

@@ -2,7 +2,9 @@
 
 import type { Components } from 'react-markdown';
 import ReactMarkdown from 'react-markdown';
+import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 
 import { cn } from '@/lib/utils';
 
@@ -22,7 +24,9 @@ const markdownComponents: Components = {
       {children}
     </h3>
   ),
-  p: ({ children }) => <p className="my-2 leading-6 first:mt-0 last:mb-0">{children}</p>,
+  p: ({ children }) => (
+    <p className="my-2 leading-6 first:mt-0 last:mb-0">{children}</p>
+  ),
   ul: ({ children }) => (
     <ul className="my-2 list-disc space-y-1 pl-5 leading-6">{children}</ul>
   ),
@@ -41,7 +45,7 @@ const markdownComponents: Components = {
     </a>
   ),
   blockquote: ({ children }) => (
-    <blockquote className="my-3 border-l-2 border-sky-500 bg-sky-50/70 py-1 pl-3 text-slate-600 dark:bg-sky-950/30 dark:text-slate-300">
+    <blockquote className="my-3 border-l-2 border-sky-500 bg-sky-50/70 py-1 pl-3 text-sky-900 dark:bg-sky-950/30 dark:text-sky-200">
       {children}
     </blockquote>
   ),
@@ -67,7 +71,9 @@ const markdownComponents: Components = {
   ),
   table: ({ children }) => (
     <div className="my-3 overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
-      <table className="w-full border-collapse text-left text-[0.92em]">{children}</table>
+      <table className="w-full border-collapse text-left text-[0.92em]">
+        {children}
+      </table>
     </div>
   ),
   thead: ({ children }) => (
@@ -87,26 +93,66 @@ const markdownComponents: Components = {
   ),
   hr: () => <hr className="my-4 border-slate-200 dark:border-slate-800" />,
   strong: ({ children }) => (
-    <strong className="font-semibold text-slate-900 dark:text-slate-100">{children}</strong>
+    <strong className="font-semibold text-slate-900 dark:text-slate-100">
+      {children}
+    </strong>
   ),
 };
+
+function normalizeMathDelimiters(content: string) {
+  return (
+    content
+      // Accept standard LaTeX delimiters in older and externally supplied answers.
+      .replace(
+        /\\\[([\s\S]*?)\\\]/g,
+        (_, expression: string) => `\n\n$$\n${expression.trim()}\n$$\n\n`
+      )
+      .replace(
+        /\\\(([^\n]*?)\\\)/g,
+        (_, expression: string) => `$${expression.trim()}$`
+      )
+      // Repair the model's occasional "[ \\formula ]" pseudo-delimiter without
+      // touching Markdown links or [KB:<id>] citations.
+      .replace(
+        /\[\s*((?=[^\]\n]*\\[A-Za-z]+)(?=[^\]\n]*(?:[_^{}=]|\\frac))[^\]\n]+?)\s*\]/g,
+        (_, expression: string) => `\n\n$$\n${expression.trim()}\n$$\n\n`
+      )
+  );
+}
 
 export function MarkdownResponse({
   content,
   className,
+  evidence = [],
 }: {
   content: string;
   className?: string;
+  evidence?: Array<{ chunkId: number }>;
 }) {
+  const citationIds = new Set(evidence.map((item) => Number(item.chunkId)));
+  const normalizedContent = normalizeMathDelimiters(content)
+    // The model occasionally emits task-list syntax for ordinary bullets. In
+    // this read-only response it renders as a stray checkbox on every line.
+    .replace(/^(\s*[-*+])\s+\[[ xX]\]\s+/gm, '$1 ')
+    .replace(/\[KB:(\d+)\](?!\()/g, (citation, value: string) => {
+      const chunkId = Number(value);
+      return citationIds.has(chunkId)
+        ? `[KB:${chunkId}](/knowledge/passages/${chunkId})`
+        : citation;
+    });
   return (
     <div
       className={cn(
-        'min-w-0 break-words text-slate-800 dark:text-slate-200',
+        'markdown-response min-w-0 break-words text-slate-800 dark:text-slate-200',
         className
       )}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-        {content}
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
+        components={markdownComponents}
+      >
+        {normalizedContent}
       </ReactMarkdown>
     </div>
   );

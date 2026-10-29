@@ -14,6 +14,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = REPOSITORY_ROOT / "Mantainance"
 OUTPUT_ROOT = REPOSITORY_ROOT / "tmp" / "maintenance_cleaning"
 RAW_OUTPUT = OUTPUT_ROOT / "raw_sources.json"
+EXCLUDED_SOURCE_FILES = {"spares&consumables bremen.xlsx"}
 
 
 def file_sha256(path: Path) -> str:
@@ -128,6 +129,8 @@ def main() -> None:
 
     for path in sorted(SOURCE_ROOT.rglob("*")):
         if not path.is_file():
+            continue
+        if path.name.casefold() in EXCLUDED_SOURCE_FILES:
             continue
         relative_path = path.relative_to(SOURCE_ROOT).as_posix()
         extension = path.suffix.lower()

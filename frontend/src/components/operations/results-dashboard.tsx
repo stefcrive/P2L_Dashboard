@@ -1,7 +1,7 @@
 'use client';
+import { postUploadForm } from '@/lib/cloud/upload-client';
 
 import {
-  KeyboardEvent,
   PointerEvent as ReactPointerEvent,
   useEffect,
   useMemo,
@@ -13,20 +13,21 @@ import dynamic from 'next/dynamic';
 import type { PlotParams } from 'react-plotly.js';
 import {
   Download,
-  Check,
+  Axis3D,
   ChevronDown,
+  Eye,
+  EyeOff,
   FileSpreadsheet,
   FilterX,
   GripHorizontal,
+  Rows3,
+  Search,
   RefreshCw,
   Upload,
-  X,
 } from 'lucide-react';
 import {
-  Brush,
   CartesianGrid,
   ErrorBar,
-  Legend,
   ResponsiveContainer,
   Scatter,
   ScatterChart,
@@ -53,6 +54,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { selectClassName } from '@/lib/operations/client';
+import { cn } from '@/lib/utils';
 
 const Plot = dynamic<PlotParams>(
   () => import('react-plotly.js').then((module) => module.default),
@@ -136,6 +138,16 @@ type FilterOption = {
   count: number;
 };
 
+type PlotAxis = 'primary' | 'secondary';
+type PlotLayoutMode = 'overlay' | 'stacked';
+type ChartLibrary = 'plotly' | 'recharts';
+type IdentifierAxisKind = 'numeric' | 'coded' | 'categorical';
+
+type SeriesSetting = {
+  visible: boolean;
+  axis: PlotAxis;
+};
+
 type SearchFilters = {
   identifier1: string[];
   identifier2: string[];
@@ -152,16 +164,16 @@ const emptyFilters: SearchFilters = {
   resultFileId: [],
 };
 
-const speciesColours = [
-  '#0f7792',
-  '#dd7b16',
-  '#3154a5',
-  '#118766',
-  '#9a4fa3',
-];
+const speciesColours = ['#4934CB', '#B7791F', '#8273DE', '#008B78', '#5677A6'];
+const rechartsLineStyles = ['', '6 3', '2 2', '8 3 2 3', '1 3'];
 
-const speciesLineStyles = ['', '6 3', '2 2', '8 3 2 3', '1 3'];
-const plotlyLineStyles = ['solid', 'dash', 'dot', 'dashdot', 'longdash'] as const;
+const plotlyLineStyles = [
+  'solid',
+  'dash',
+  'dot',
+  'dashdot',
+  'longdash',
+] as const;
 
 function formatNumber(value: number | null, digits = 3) {
   if (value === null) return '—';
@@ -208,51 +220,13 @@ async function uploadResultFile(file: File) {
   const formData = new FormData();
   formData.set('file', file);
   return readJson(
-    await fetch('/api/results/upload', { method: 'POST', body: formData })
+    await postUploadForm('/api/results/upload', formData)
   );
 }
 
 async function syncResultsFolder() {
   return readJson(
     await fetch('/api/results/sync', { method: 'POST', cache: 'no-store' })
-  );
-}
-
-function ResultTooltip({
-  active,
-  payload,
-  metric,
-}: {
-  active?: boolean;
-  payload?: Array<{ payload: ChartPoint }>;
-  metric: 'carbon' | 'oxygen';
-}) {
-  const point = payload?.[0]?.payload;
-  if (!active || !point) return null;
-  if (point.isPrecision) {
-    return (
-      <div className="rounded-lg border bg-background px-3 py-2 text-xs shadow-lg">
-        <p className="font-semibold">Standard measurement precision</p>
-        <p className="mt-1 font-mono tabular-nums">
-          +/- {formatNumber(point.uncertainty)} per mil on the plotted y-axis
-        </p>
-      </div>
-    );
-  }
-  return (
-    <div className="max-w-72 rounded-lg border bg-background px-3 py-2 text-xs shadow-lg">
-      <p className="font-semibold">{point.species}</p>
-      <p className="mt-1 text-muted-foreground">{point.identifier1}</p>
-      <p className="text-muted-foreground">Identifier 2: {point.identifier2}</p>
-      <p className="mt-2 font-mono text-sm font-semibold tabular-nums">
-        {metric === 'carbon' ? 'δ13C' : 'δ18O'} {formatNumber(point.y)} ‰
-      </p>
-      {point.uncertainty !== null ? (
-        <p className="mt-1 font-mono text-[11px] text-muted-foreground">
-          Precision +/- {formatNumber(point.uncertainty)} per mil
-        </p>
-      ) : null}
-    </div>
   );
 }
 
@@ -263,8 +237,46 @@ type ChartPoint = {
   identifier1: string;
   identifier2: string;
   species: string;
+  identifierAxisKind: IdentifierAxisKind;
   isPrecision?: boolean;
 };
+
+const identifierAxisLabels: Record<IdentifierAxisKind, string> = {
+  numeric: 'Numeric / depth sequence',
+  coded: 'Coded sample sequence',
+  categorical: 'Categorical sequence',
+};
+
+const identifierAxisOrder: IdentifierAxisKind[] = [
+  'numeric',
+  'coded',
+  'categorical',
+];
+
+const numericIdentifier2Pattern =
+  /^[<>]?\s*(-?\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*(-?\d+(?:[.,]\d+)?))?\s*(?:mm|cm|m|ka|kyr|yr|years?)?\s*(bis|ter|[a-z])?$/i;
+
+function numericIdentifier2Position(value: string) {
+  const match = numericIdentifier2Pattern.exec(value.trim());
+  if (!match) return null;
+  const start = Number(match[1].replace(',', '.'));
+  const end = match[2] ? Number(match[2].replace(',', '.')) : start;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return (start + end) / 2;
+}
+
+function numericIdentifier2Variant(value: string) {
+  return numericIdentifier2Pattern.exec(value.trim())?.[3]?.toLowerCase() ?? '';
+}
+
+function classifyIdentifier2(value: string): IdentifierAxisKind {
+  const normalized = value.trim();
+  if (numericIdentifier2Position(normalized) !== null) return 'numeric';
+  if (/[A-Za-zÀ-ÖØ-öø-ÿ]/.test(normalized) && /\d/.test(normalized)) {
+    return 'coded';
+  }
+  return 'categorical';
+}
 
 function countOptions(
   rows: ResultOptionRow[],
@@ -328,189 +340,433 @@ function rowMatchesFilters(
   return true;
 }
 
-function SearchableDropdown({
+function FilterTable({
   id,
   label,
   options,
   value,
   onChange,
-  placeholder,
-  multiple = false,
+  loading = false,
 }: {
   id: string;
   label: string;
   options: FilterOption[];
-  value: string | string[];
-  onChange: (value: string | string[]) => void;
-  placeholder: string;
-  multiple?: boolean;
+  value: string[];
+  onChange: (value: string[]) => void;
+  loading?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [activeIndex, setActiveIndex] = useState(0);
-  const selectedValues = Array.isArray(value) ? value : value ? [value] : [];
-  const selectedLabel =
-    !multiple && selectedValues.length
-      ? options.find((option) => option.value === selectedValues[0])?.label ??
-        selectedValues[0]
-      : '';
-  const visibleOptions = options
-    .filter((option) =>
-      option.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
-    );
-
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [query]);
-
-  function choose(option: FilterOption) {
-    if (multiple) {
-      const next = selectedValues.includes(option.value)
-        ? selectedValues.filter((value) => value !== option.value)
-        : [...selectedValues, option.value];
-      onChange(next);
-      setQuery('');
-      setOpen(true);
-      return;
-    }
-    onChange(option.value);
-    setQuery('');
-    setOpen(false);
-  }
-
-  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key === 'ArrowDown') {
-      event.preventDefault();
-      setOpen(true);
-      setActiveIndex((index) =>
-        Math.min(index + 1, Math.max(visibleOptions.length - 1, 0))
-      );
-    } else if (event.key === 'ArrowUp') {
-      event.preventDefault();
-      setActiveIndex((index) => Math.max(index - 1, 0));
-    } else if (event.key === 'Enter' && open && visibleOptions[activeIndex]) {
-      event.preventDefault();
-      choose(visibleOptions[activeIndex]);
-    } else if (event.key === 'Escape') {
-      setOpen(false);
-    }
-  }
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const matchingOptions = options.filter((option) =>
+    option.label.toLocaleLowerCase().includes(normalizedQuery)
+  );
+  const visibleOptions = matchingOptions.slice(0, 80);
 
   return (
-    <div className="relative">
-      <label htmlFor={id} className="block text-xs font-medium">
-        {label}
-      </label>
-      <div className="relative mt-1">
-        <Input
-          id={id}
-          role="combobox"
-          aria-expanded={open}
-          aria-controls={`${id}-options`}
-          aria-autocomplete="list"
-          value={open || multiple ? query : selectedLabel}
-          onFocus={() => setOpen(true)}
-          onClick={() => setOpen(true)}
-          onBlur={() => window.setTimeout(() => setOpen(false), 120)}
-          onChange={(event) => {
-            setQuery(event.target.value);
-            setOpen(true);
-            if (!multiple && selectedValues.length) onChange('');
-          }}
-          onKeyDown={handleKeyDown}
-          placeholder={
-            multiple && selectedValues.length
-              ? `${selectedValues.length} selected`
-              : placeholder
-          }
-          className="pr-16"
-        />
-        {selectedValues.length ? (
-          <button
+    <div className="min-w-0 overflow-hidden rounded-md border bg-background">
+      <div className="flex min-h-8 items-center justify-between gap-2 border-b bg-slate-50 px-2 py-1 dark:bg-slate-900">
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+          <h3 className="truncate text-xs font-semibold">{label}</h3>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            {value.length
+              ? `${value.length} included`
+              : `${options.length} available`}
+          </p>
+        </div>
+        {value.length ? (
+          <Button
             type="button"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => {
-              onChange(multiple ? [] : '');
-              setQuery('');
-            }}
-            className="absolute right-8 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-            aria-label={`Clear ${label}`}
+            size="sm"
+            variant="ghost"
+            className="h-7 px-2 text-[11px]"
+            onClick={() => onChange([])}
           >
-            <X className="h-3.5 w-3.5" />
-          </button>
+            Clear
+          </Button>
         ) : null}
-        <ChevronDown
-          className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+      </div>
+      <div className="relative border-b p-1.5">
+        <Search
+          className="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
           aria-hidden="true"
         />
+        <Input
+          id={id}
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={`Find ${label.toLocaleLowerCase()}…`}
+          className="h-8 pl-8 text-xs"
+        />
       </div>
-      {open ? (
-        <div
-          id={`${id}-options`}
-          role="listbox"
-          aria-multiselectable={multiple || undefined}
-          className="absolute z-30 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-lg"
-        >
-          {visibleOptions.length ? (
-            visibleOptions.map((option, index) => {
-              const selected = selectedValues.includes(option.value);
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  role="option"
-                  aria-selected={selected}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => choose(option)}
-                  className={`flex w-full items-center gap-2 rounded px-2 py-2 text-left text-xs ${
-                    index === activeIndex
-                      ? 'bg-accent text-accent-foreground'
-                      : 'hover:bg-muted'
-                  }`}
-                >
-                  <span className="grid h-4 w-4 shrink-0 place-items-center">
-                    {selected ? <Check className="h-3.5 w-3.5" /> : null}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate">{option.label}</span>
-                  <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
-                    {option.count}
-                  </span>
-                </button>
-              );
-            })
-          ) : (
-            <p className="px-2 py-3 text-xs text-muted-foreground">
-              No options match &quot;{query}&quot;.
-            </p>
-          )}
-        </div>
-      ) : null}
-      {multiple && selectedValues.length ? (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {selectedValues.map((selected) => (
-            <button
-              key={selected}
-              type="button"
-              onClick={() =>
-                onChange(selectedValues.filter((value) => value !== selected))
-              }
-              className="inline-flex max-w-full items-center gap-1 rounded-md border bg-muted/50 px-2 py-1 text-[10px] font-medium"
-            >
-              <span className="truncate">
-                {options.find((option) => option.value === selected)?.label ??
-                  selected}
-              </span>
-              <X className="h-3 w-3 shrink-0" />
-            </button>
-          ))}
-        </div>
+      <div className="h-28 overflow-y-auto" aria-busy={loading}>
+        {loading ? (
+          <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+            Loading options…
+          </p>
+        ) : visibleOptions.length ? (
+          <table className="w-full table-fixed text-xs">
+            <colgroup><col className="w-8" /><col /><col className="w-12" /></colgroup>
+            <thead className="sticky top-0 z-10 bg-background shadow-[0_1px_0_hsl(var(--border))]">
+              <tr>
+                <th className="px-2 py-1 text-left font-medium text-muted-foreground">
+                  <span className="sr-only">Include</span>
+                </th>
+                <th className="px-1 py-1 text-left font-medium text-muted-foreground">
+                  Value
+                </th>
+                <th className="px-2 py-1 text-right font-medium text-muted-foreground">
+                  Rows
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleOptions.map((option) => {
+                const selected = value.includes(option.value);
+                return (
+                  <tr
+                    key={option.value}
+                    data-state={selected ? 'selected' : undefined}
+                    className="border-b last:border-0 hover:bg-muted/50 data-[state=selected]:bg-blue-50 dark:data-[state=selected]:bg-blue-950/35"
+                  >
+                    <td className="px-2 py-1">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() =>
+                          onChange(
+                            selected
+                              ? value.filter((item) => item !== option.value)
+                              : [...value, option.value]
+                          )
+                        }
+                        aria-label={`${selected ? 'Exclude' : 'Include'} ${option.label}`}
+                        className="h-4 w-4 accent-blue-600"
+                      />
+                    </td>
+                    <td
+                      className="truncate px-1 py-1 font-medium"
+                      title={option.label}
+                    >
+                      {option.label}
+                    </td>
+                    <td className="px-2 py-1 text-right font-mono text-[11px] tabular-nums text-muted-foreground">
+                      {option.count.toLocaleString()}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+            {query
+              ? `No ${label.toLocaleLowerCase()} match “${query}”.`
+              : 'No options available.'}
+          </p>
+        )}
+      </div>
+      {matchingOptions.length > visibleOptions.length ? (
+        <p className="border-t px-3 py-2 text-[11px] text-muted-foreground">
+          Showing 80 of {matchingOptions.length}. Use search to narrow the
+          table.
+        </p>
       ) : null}
     </div>
   );
 }
 
+function SeriesConfigurationTable({
+  groups,
+  settings,
+  onChange,
+}: {
+  groups: Array<[string, ChartPoint[]]>;
+  settings: Record<string, SeriesSetting>;
+  onChange: (series: string, setting: SeriesSetting) => void;
+}) {
+  if (!groups.length) {
+    return (
+      <EmptyState
+        title="No plot series available"
+        description="Choose at least one item in the filter tables to build the series list."
+      />
+    );
+  }
+
+  return (
+    <Table containerClassName="max-h-80" className="min-w-[760px]">
+      <TableHeader className="sticky top-0 z-20">
+        <TableRow>
+          <TableHead>Series</TableHead>
+          <TableHead>X-axis</TableHead>
+          <TableHead className="text-right">Points</TableHead>
+          <TableHead>Chart</TableHead>
+          <TableHead>Y-axis</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {groups.map(([series, points], index) => {
+            const identifierAxisKind =
+              points[0]?.identifierAxisKind ?? 'categorical';
+            const setting = settings[series] ?? {
+              visible: true,
+              axis: 'primary' as const,
+            };
+            return (
+              <TableRow
+                key={series}
+                data-state={setting.visible ? 'selected' : undefined}
+              >
+                <TableCell>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span
+                      className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                      style={{
+                        backgroundColor:
+                          speciesColours[index % speciesColours.length],
+                      }}
+                      aria-hidden="true"
+                    />
+                    <span
+                      className="max-w-80 truncate font-medium"
+                      title={series}
+                    >
+                      {series}
+                    </span>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <StatusPill tone="neutral">
+                    {identifierAxisLabels[identifierAxisKind]}
+                  </StatusPill>
+                </TableCell>
+                <TableCell className="text-right font-mono tabular-nums text-muted-foreground">
+                  {points.length.toLocaleString()}
+                </TableCell>
+                <TableCell>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={setting.visible ? 'secondary' : 'ghost'}
+                    className="h-7 min-w-20 justify-start px-2 text-[11px]"
+                    onClick={() =>
+                      onChange(series, {
+                        ...setting,
+                        visible: !setting.visible,
+                      })
+                    }
+                    aria-pressed={setting.visible}
+                  >
+                    {setting.visible ? (
+                      <Eye className="mr-1.5 h-3.5 w-3.5" />
+                    ) : (
+                      <EyeOff className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    {setting.visible ? 'Included' : 'Excluded'}
+                  </Button>
+                </TableCell>
+                <TableCell>
+                  <div className="inline-flex rounded-md border bg-background p-0.5">
+                    {(['primary', 'secondary'] as PlotAxis[]).map((axis) => {
+                      return (
+                        <button
+                          key={axis}
+                          type="button"
+                          className={`h-6 rounded px-2 text-[11px] font-medium ${
+                            setting.axis === axis
+                              ? 'bg-primary text-primary-foreground'
+                              : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                          }`}
+                          onClick={() => onChange(series, { ...setting, axis })}
+                          aria-pressed={setting.axis === axis}
+                        >
+                          {axis === 'primary' ? 'Shared' : 'Secondary'}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </TableCell>
+              </TableRow>
+            );
+        })}
+      </TableBody>
+    </Table>
+  );
+}
+
+type ChartRowSeries = {
+  series: string;
+  points: ChartPoint[];
+  seriesIndex: number;
+  setting: SeriesSetting;
+};
+
+type ChartRow = {
+  key: string;
+  identifierAxisKind: IdentifierAxisKind;
+  series: ChartRowSeries[];
+};
+
+function buildChartRows(
+  groups: Array<[string, ChartPoint[]]>,
+  settings: Record<string, SeriesSetting>,
+  layoutMode: PlotLayoutMode
+) {
+  const rows = new Map<string, ChartRow>();
+  groups.forEach(([series, points], seriesIndex) => {
+    const identifierAxisKind =
+      points[0]?.identifierAxisKind ?? 'categorical';
+    const setting = settings[series] ?? {
+      visible: true,
+      axis: 'primary' as const,
+    };
+    if (!setting.visible || !points.length) return;
+    const key =
+      layoutMode === 'overlay'
+        ? `axis:${identifierAxisKind}`
+        : `series:${series}`;
+    const row = rows.get(key) ?? {
+      key,
+      identifierAxisKind,
+      series: [],
+    };
+    row.series.push({ series, points, seriesIndex, setting });
+    rows.set(key, row);
+  });
+  return Array.from(rows.values()).sort(
+    (first, second) =>
+      identifierAxisOrder.indexOf(first.identifierAxisKind) -
+        identifierAxisOrder.indexOf(second.identifierAxisKind) ||
+      first.series[0].seriesIndex - second.series[0].seriesIndex
+  );
+}
+
+function sampledAxisEntries(labels: Map<number, string>, maximum = 18) {
+  const entries = Array.from(labels.entries()).sort(
+    ([first], [second]) => first - second
+  );
+  const step = Math.max(1, Math.ceil(entries.length / maximum));
+  return entries.filter(
+    (_, index) => index % step === 0 || index === entries.length - 1
+  );
+}
+
+function sharedXAxisDomain(labels: Map<number, string>): [number, number] {
+  const values = Array.from(labels.keys());
+  if (!values.length) return [0, 1];
+  const minimum = Math.min(...values);
+  const maximum = Math.max(...values);
+  const padding = Math.max((maximum - minimum) * 0.015, 0.5);
+  return [minimum - padding, maximum + padding];
+}
+
+function bottomRowIndices(rows: ChartRow[]) {
+  const indices = new Map<IdentifierAxisKind, number>();
+  rows.forEach((row, index) => indices.set(row.identifierAxisKind, index));
+  return indices;
+}
+
+function RechartsResultTooltip({
+  active,
+  payload,
+  metric,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: ChartPoint }>;
+  metric: 'carbon' | 'oxygen';
+}) {
+  const point = payload?.[0]?.payload;
+  if (!active || !point) return null;
+  return (
+    <div className="max-w-72 rounded-md border bg-background px-3 py-2 text-xs shadow-lg">
+      <p className="font-semibold">{point.species}</p>
+      <p className="mt-1 text-muted-foreground">{point.identifier1}</p>
+      <p className="text-muted-foreground">Identifier 2: {point.identifier2}</p>
+      <p className="mt-2 font-mono font-semibold tabular-nums">
+        {metric === 'carbon' ? 'δ13C' : 'δ18O'} {formatNumber(point.y)} ‰
+      </p>
+    </div>
+  );
+}
+
+function ChartLegend({
+  groups,
+  settings,
+  onChange,
+  chartLibrary,
+  showLine,
+  showSymbols,
+  precisionPoint,
+}: {
+  groups: Array<[string, ChartPoint[]]>;
+  settings: Record<string, SeriesSetting>;
+  onChange: (series: string, setting: SeriesSetting) => void;
+  chartLibrary: ChartLibrary;
+  showLine: boolean;
+  showSymbols: boolean;
+  precisionPoint: ChartPoint | null;
+}) {
+  return (
+    <details className="group min-w-0 rounded-md border bg-card xl:col-span-2">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-panel py-3 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+        <span>Chart legend</span>
+        <span className="flex items-center gap-2">
+          <span className="text-xs font-normal text-muted-foreground">
+            {groups.length} series
+          </span>
+          <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" aria-hidden="true" />
+        </span>
+      </summary>
+      <div className="border-t p-panel">
+        <p className="mb-3 text-xs text-muted-foreground">
+          Colours and line patterns identify each series. Select a series to show or hide it.
+        </p>
+        {groups.length ? (
+          <ul className="grid max-h-72 gap-2 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
+            {groups.map(([series], index) => {
+              const setting = settings[series] ?? { visible: true, axis: 'primary' as const };
+              const colour = speciesColours[index % speciesColours.length];
+              const dash = chartLibrary === 'plotly'
+                ? ['', '6 6', '2 3', '6 3 2 3', '12 6'][index % plotlyLineStyles.length]
+                : rechartsLineStyles[index % rechartsLineStyles.length];
+              return (
+                <li key={series} className="min-w-0">
+                  <button
+                    type="button"
+                    className={cn('flex w-full items-start gap-2 rounded-md border px-3 py-2 text-left text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', !setting.visible && 'opacity-50')}
+                    aria-pressed={setting.visible}
+                    aria-label={`${setting.visible ? 'Hide' : 'Show'} ${series}`}
+                    onClick={() => onChange(series, { ...setting, visible: !setting.visible })}
+                  >
+                    <svg width="36" height="16" viewBox="0 0 36 16" className="shrink-0" aria-hidden="true">
+                      {showLine ? <line x1="0" x2="36" y1="8" y2="8" stroke={colour} strokeWidth="1.5" strokeDasharray={dash} /> : null}
+                      {showSymbols ? <circle cx="18" cy="8" r="4" fill={colour} /> : null}
+                    </svg>
+                    <span className={cn('min-w-0 break-words', !setting.visible && 'line-through')}>{series}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        ) : <p className="text-xs text-muted-foreground">Choose data in the filter tables to see its legend.</p>}
+        {precisionPoint ? (
+          <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+            <svg width="36" height="16" viewBox="0 0 36 16" className="shrink-0" aria-hidden="true">
+              <path d="M18 2v12M13 2h10M13 14h10" fill="none" stroke="currentColor" strokeWidth="1.5" />
+              <circle cx="18" cy="8" r="2" fill="currentColor" />
+            </svg>
+            {precisionPoint.species}
+          </p>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
 function PlotlySequenceChart({
   groups,
+  settings,
+  layoutMode,
   precisionPoint,
   metric,
   showLine,
@@ -519,64 +775,101 @@ function PlotlySequenceChart({
   symbolSize,
   xAxisLabels,
   hasSelection,
+  height,
+  width,
+  dark,
 }: {
   groups: Array<[string, ChartPoint[]]>;
+  settings: Record<string, SeriesSetting>;
+  layoutMode: PlotLayoutMode;
   precisionPoint: ChartPoint | null;
   metric: 'carbon' | 'oxygen';
   showLine: boolean;
   showSymbols: boolean;
   showPrecision: boolean;
   symbolSize: number;
-  xAxisLabels: Map<number, string>;
+  xAxisLabels: Map<IdentifierAxisKind, Map<number, string>>;
   hasSelection: boolean;
+  height: number;
+  width: number;
+  dark: boolean;
 }) {
-  const traces: PlotParams['data'] = groups.map(([species, points], index) => ({
-    type: 'scatter',
-    mode:
-      showLine && showSymbols
-        ? 'lines+markers'
-        : showLine
-          ? 'lines'
-          : 'markers',
-    name: species,
-    x: points.map((point) => point.x),
-    y: points.map((point) => point.y),
-    customdata: points.map((point) => [
-      point.identifier1,
-      point.identifier2,
-      point.uncertainty,
-    ]),
-    line: {
-      color: speciesColours[index % speciesColours.length],
-      width: 1.5,
-      dash: plotlyLineStyles[index % plotlyLineStyles.length],
-    },
-    marker: {
-      color: speciesColours[index % speciesColours.length],
-      size: symbolSize * 2,
-      line: { color: '#ffffff', width: 1 },
-    },
-    hovertemplate:
-      '<b>%{fullData.name}</b><br>' +
-      '%{customdata[0]}<br>' +
-      'Identifier 2: %{customdata[1]}<br>' +
-      `${metric === 'carbon' ? 'δ13C' : 'δ18O'}: %{y:.3f} ‰<br>` +
-      'Precision: %{customdata[2]:.3f} ‰<extra></extra>',
-  }));
+  const rows = buildChartRows(groups, settings, layoutMode);
+  const bottomRows = bottomRowIndices(rows);
+  const metricLabel = metric === 'carbon' ? 'δ13C' : 'δ18O';
+  const xAxisReference = (axisNumber: number) =>
+    axisNumber === 1 ? 'x' : `x${axisNumber}`;
+  const yAxisReference = (axisNumber: number) =>
+    axisNumber === 1 ? 'y' : `y${axisNumber}`;
+  const traces: PlotParams['data'] = [];
 
-  if (showPrecision && precisionPoint) {
+  rows.forEach((row, rowIndex) => {
+    const xAxis = xAxisReference(rowIndex + 1);
+    const primaryAxisNumber = rowIndex * 2 + 1;
+    row.series.forEach(({ series, points, seriesIndex, setting }) => {
+      const yAxis = yAxisReference(
+        setting.axis === 'secondary' ? primaryAxisNumber + 1 : primaryAxisNumber
+      );
+      const colour = speciesColours[seriesIndex % speciesColours.length];
+      traces.push({
+        type: 'scatter',
+        mode:
+          showLine && showSymbols
+            ? 'lines+markers'
+            : showLine
+              ? 'lines'
+              : 'markers',
+        name: series,
+        xaxis: xAxis,
+        yaxis: yAxis,
+        x: points.map((point) => point.x),
+        y: points.map((point) => point.y),
+        customdata: points.map((point) => [
+          point.identifier1,
+          point.identifier2,
+          point.uncertainty,
+          setting.axis,
+        ]),
+        line: {
+          color: colour,
+          width: 1.5,
+          dash: plotlyLineStyles[seriesIndex % plotlyLineStyles.length],
+        },
+        marker: {
+          color: colour,
+          size: symbolSize * 2,
+          line: { color: '#ffffff', width: 1 },
+        },
+        hovertemplate:
+          '<b>%{fullData.name}</b><br>' +
+          '%{customdata[0]}<br>' +
+          'Identifier 2: %{customdata[1]}<br>' +
+          `${metricLabel}: %{y:.3f} ‰<br>` +
+          'Precision: %{customdata[2]:.3f} ‰<br>' +
+          'Axis: %{customdata[3]}<extra></extra>',
+      });
+    });
+  });
+
+  const firstRow = rows[0];
+  if (showPrecision && precisionPoint && firstRow) {
+    const firstX = Math.min(
+      ...firstRow.series.flatMap(({ points }) => points.map((point) => point.x))
+    );
     traces.push({
       type: 'scatter',
       mode: 'markers',
       name: precisionPoint.species,
-      x: [precisionPoint.x],
+      xaxis: 'x',
+      yaxis: 'y',
+      x: [firstX],
       y: [precisionPoint.y],
-      marker: { color: '#334155', size: 5 },
+      marker: { color: dark ? '#cbd5e1' : '#334155', size: 5 },
       error_y: {
         type: 'data',
         array: [precisionPoint.uncertainty ?? 0],
         visible: true,
-        color: '#334155',
+        color: dark ? '#cbd5e1' : '#334155',
         thickness: 1.5,
         width: 5,
       },
@@ -584,103 +877,422 @@ function PlotlySequenceChart({
     });
   }
 
-  const tickEntries = Array.from(xAxisLabels.entries()).sort(
-    ([first], [second]) => first - second
-  );
+  rows.forEach((row, rowIndex) => {
+    const hasPrimaryData = row.series.some(
+      ({ setting }) => setting.axis === 'primary'
+    );
+    const precisionAnchorsRow =
+      rowIndex === 0 && showPrecision && Boolean(precisionPoint);
+    if (!hasPrimaryData && !precisionAnchorsRow) {
+      const primaryAxisNumber = rowIndex * 2 + 1;
+      traces.push({
+        type: 'scatter',
+        mode: 'markers',
+        name: `Primary axis anchor ${row.key}`,
+        xaxis: xAxisReference(rowIndex + 1),
+        yaxis: yAxisReference(primaryAxisNumber),
+        x: [null],
+        y: [null],
+        marker: { opacity: 0 },
+        hoverinfo: 'skip',
+        showlegend: false,
+      });
+    }
+  });
+
   const emptyMessage = hasSelection
-    ? 'No plottable measurements match these filters.'
-    : 'Select one or more filter items to plot measurements.';
+    ? rows.length
+      ? 'No plottable measurements match these filters.'
+      : 'Every series is excluded. Include a series in the table above.'
+    : 'Select one or more items in the filter tables to plot measurements.';
+  const rowCount = Math.max(rows.length, 1);
+  // A compact default must not compress several independent axes into one row.
+  const plotHeight = Math.max(height, rowCount * 160 + 42 + 56);
+  const layout: NonNullable<PlotParams['layout']> = {
+    autosize: true,
+    height: plotHeight,
+    margin: { t: 42, r: 58, b: 56, l: 64 },
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { color: dark ? '#b6c3d5' : '#475569', size: 11 },
+    hovermode: 'closest',
+    showlegend: false,
+    annotations:
+      rows.length === 0
+        ? [
+            {
+              text: emptyMessage,
+              x: 0.5,
+              y: 0.5,
+              xref: 'paper',
+              yref: 'paper',
+              showarrow: false,
+              font: { color: '#697697', size: 12 },
+            },
+          ]
+        : [],
+  };
+
+  rows.forEach((row, rowIndex) => {
+    const gap = rowCount > 1 ? (layoutMode === 'stacked' ? 0.045 : 0.11) : 0;
+    const domainHeight = (1 - gap * (rowCount - 1)) / rowCount;
+    const upper = 1 - rowIndex * (domainHeight + gap);
+    const lower = Math.max(0, upper - domainHeight);
+    const xAxisNumber = rowIndex + 1;
+    const primaryAxisNumber = rowIndex * 2 + 1;
+    const secondaryAxisNumber = primaryAxisNumber + 1;
+    const xAxis = xAxisReference(xAxisNumber);
+    const primaryAxis = yAxisReference(primaryAxisNumber);
+    const xAxisKey = xAxisNumber === 1 ? 'xaxis' : `xaxis${xAxisNumber}`;
+    const primaryAxisKey =
+      primaryAxisNumber === 1 ? 'yaxis' : `yaxis${primaryAxisNumber}`;
+    const secondaryAxisKey = `yaxis${secondaryAxisNumber}`;
+    const tickEntries = sampledAxisEntries(
+      xAxisLabels.get(row.identifierAxisKind) ?? new Map(),
+      Math.max(3, Math.min(12, Math.floor((width - 122) / 64)))
+    );
+    const axisLabels =
+      xAxisLabels.get(row.identifierAxisKind) ?? new Map<number, string>();
+    const showSharedXAxis =
+      layoutMode !== 'stacked' ||
+      bottomRows.get(row.identifierAxisKind) === rowIndex;
+    const sharedAxisIndex = bottomRows.get(row.identifierAxisKind) ?? rowIndex;
+    const rowHasSecondaryAxis = row.series.some(
+      ({ setting }) => setting.axis === 'secondary'
+    );
+    const rowLabel =
+      layoutMode === 'stacked'
+        ? (row.series[0]?.series ?? identifierAxisLabels[row.identifierAxisKind])
+        : identifierAxisLabels[row.identifierAxisKind];
+    const axes: Record<string, unknown> = {
+      [xAxisKey]: {
+        title: {
+          text: showSharedXAxis
+            ? `Identifier 2 · ${identifierAxisLabels[row.identifierAxisKind]}`
+            : '',
+        },
+        domain: [0, 1],
+        range: sharedXAxisDomain(axisLabels),
+        matches:
+          layoutMode === 'stacked' && rowIndex !== sharedAxisIndex
+            ? xAxisReference(sharedAxisIndex + 1)
+            : undefined,
+        anchor: primaryAxis,
+        tickmode: 'array',
+        tickvals: tickEntries.map(([value]) => value),
+        ticktext: tickEntries.map(([, label]) => label),
+        tickangle: 0,
+        showticklabels: showSharedXAxis,
+        ticks: showSharedXAxis ? 'outside' : '',
+        tickfont: { size: 11 },
+        automargin: true,
+        showline: showSharedXAxis,
+        linecolor: '#94a3b8',
+        linewidth: 1,
+        gridcolor: dark ? '#29394f' : '#cbd5e1',
+        zeroline: false,
+      },
+      [primaryAxisKey]: {
+        title: {
+          text: `${metricLabel} (‰ VPDB)`,
+        },
+        domain: [lower, upper],
+        gridcolor: dark ? '#29394f' : '#cbd5e1',
+        zerolinecolor: '#94a3b8',
+        showline: true,
+        showticklabels: true,
+        ticks: 'outside',
+        anchor: xAxis,
+      },
+    };
+    if (rowHasSecondaryAxis) {
+      axes[secondaryAxisKey] = {
+        title: {
+          text: `Secondary · ${metricLabel} (‰ VPDB)`,
+        },
+        domain: [lower, upper],
+        overlaying: primaryAxis,
+        side: 'right',
+        showgrid: false,
+        zeroline: false,
+        anchor: xAxis,
+      };
+    }
+    Object.assign(layout, axes);
+  });
+
+  if (!rows.length) {
+    return (
+      <EmptyState title="No plot series included" description={emptyMessage} />
+    );
+  }
 
   return (
     <Plot
       data={traces}
-      layout={{
-        autosize: true,
-        height: 450,
-        margin: { t: 42, r: 20, b: 72, l: 72 },
-        paper_bgcolor: 'rgba(0,0,0,0)',
-        plot_bgcolor: 'rgba(0,0,0,0)',
-        font: { color: '#64748b', size: 11 },
-        hovermode: 'closest',
-        showlegend: traces.length > 0,
-        legend: { orientation: 'h', x: 1, xanchor: 'right', y: 1.12 },
-        xaxis: {
-          title: { text: 'Identifier 2 · sample number or depth' },
-          tickmode: 'array',
-          tickvals: tickEntries.map(([value]) => value),
-          ticktext: tickEntries.map(([, label]) => label),
-          gridcolor: '#cbd5e1',
-          zeroline: false,
-          rangeslider: { visible: traces.length > 0, thickness: 0.08 },
-        },
-        yaxis: {
-          title: { text: `${metric === 'carbon' ? 'δ13C' : 'δ18O'} (‰ VPDB)` },
-          gridcolor: '#cbd5e1',
-          zerolinecolor: '#94a3b8',
-        },
-        annotations:
-          traces.length === 0
-            ? [
-                {
-                  text: emptyMessage,
-                  x: 0.5,
-                  y: 0.5,
-                  xref: 'paper',
-                  yref: 'paper',
-                  showarrow: false,
-                  font: { color: '#64748b', size: 12 },
-                },
-              ]
-            : [],
-      }}
+      layout={layout}
       config={{ responsive: true, displaylogo: false }}
-      style={{ width: '100%', height: '450px' }}
+      style={{ width: '100%', height: `${plotHeight}px` }}
       useResizeHandler
     />
   );
 }
 
-function BlankSequenceChart({
+function RechartsSequenceChart({
+  groups,
+  settings,
+  layoutMode,
+  precisionPoint,
   metric,
+  showLine,
+  showSymbols,
+  showPrecision,
+  symbolSize,
+  xAxisLabels,
   hasSelection,
+  height,
+  width,
 }: {
+  groups: Array<[string, ChartPoint[]]>;
+  settings: Record<string, SeriesSetting>;
+  layoutMode: PlotLayoutMode;
+  precisionPoint: ChartPoint | null;
   metric: 'carbon' | 'oxygen';
+  showLine: boolean;
+  showSymbols: boolean;
+  showPrecision: boolean;
+  symbolSize: number;
+  xAxisLabels: Map<IdentifierAxisKind, Map<number, string>>;
   hasSelection: boolean;
+  height: number;
+  width: number;
 }) {
+  const rows = buildChartRows(groups, settings, layoutMode);
+  const bottomRows = bottomRowIndices(rows);
   const metricLabel = metric === 'carbon' ? 'δ13C' : 'δ18O';
+  if (!rows.length) {
+    return (
+      <EmptyState
+        title={hasSelection ? 'No plot series included' : 'Choose data to plot'}
+        description={
+          hasSelection
+            ? 'Include at least one series in the table above.'
+            : 'Select one or more items in the filter tables to plot measurements.'
+        }
+      />
+    );
+  }
+
+  const rowHeight =
+    rows.length === 1
+      ? height
+      : Math.max(260, Math.floor((height - (rows.length - 1) * 16) / rows.length));
 
   return (
-    <div
-      className="relative h-[450px] w-full"
-      aria-label={`Empty ${metricLabel} isotope chart`}
-    >
-      <div className="absolute bottom-14 left-14 right-4 top-4 overflow-hidden border-b border-l">
-        <div
-          className="absolute inset-0 opacity-40"
-          style={{
-            backgroundImage:
-              'linear-gradient(to right, hsl(var(--border)) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border)) 1px, transparent 1px)',
-            backgroundSize: '10% 20%',
-          }}
-        />
-        <p className="absolute inset-0 grid place-items-center px-6 text-center text-xs text-muted-foreground">
-          {hasSelection
-            ? 'No plottable measurements match these filters.'
-            : 'Select one or more filter items to plot measurements.'}
-        </p>
-      </div>
-      <p className="absolute bottom-4 left-14 right-4 text-center text-[11px] text-muted-foreground">
-        Identifier 2 · sample number or depth
-      </p>
-      <p className="absolute bottom-14 left-0 top-4 grid w-10 place-items-center text-[11px] text-muted-foreground [writing-mode:vertical-rl] rotate-180">
-        {metricLabel} (‰ VPDB)
-      </p>
+    <div className="space-y-4 overflow-y-auto" style={{ height }}>
+      {rows.map((row, rowIndex) => {
+        const labels = xAxisLabels.get(row.identifierAxisKind) ?? new Map();
+        const ticks = sampledAxisEntries(
+          labels,
+          Math.max(3, Math.min(12, Math.floor((width - 150) / 64)))
+        ).map(([value]) => value);
+        const showSharedXAxis =
+          layoutMode !== 'stacked' ||
+          bottomRows.get(row.identifierAxisKind) === rowIndex;
+        const hasSecondary = row.series.some(
+          ({ setting }) => setting.axis === 'secondary'
+        );
+        const domainHasSecondary = rows.some(
+          (candidateRow) =>
+            candidateRow.identifierAxisKind === row.identifierAxisKind &&
+            candidateRow.series.some(
+              ({ setting }) => setting.axis === 'secondary'
+            )
+        );
+        const rowLabel =
+          layoutMode === 'stacked'
+            ? (row.series[0]?.series ??
+              identifierAxisLabels[row.identifierAxisKind])
+            : identifierAxisLabels[row.identifierAxisKind];
+        const firstX = Math.min(
+          ...row.series.flatMap(({ points }) => points.map((point) => point.x))
+        );
+        const primarySeries = row.series.filter(
+          ({ setting }) => setting.axis === 'primary'
+        );
+        const rowYValues = (
+          primarySeries.length ? primarySeries : row.series
+        ).flatMap(({ points }) => points.map((point) => point.y));
+        const rowYMin = Math.min(...rowYValues);
+        const rowYMax = Math.max(...rowYValues);
+        const rowYPadding = Math.max((rowYMax - rowYMin) * 0.08, 0.1);
+        const primaryDomain: [number, number] = [
+          rowYMin - rowYPadding,
+          rowYMax + rowYPadding,
+        ];
+        return (
+          <section
+            key={row.key}
+            className="min-w-0 border-b pb-3 last:border-0"
+          >
+            <h4 className="px-2 pt-2 text-xs font-semibold">{rowLabel}</h4>
+            <div className="w-full" style={{ height: rowHeight }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <ScatterChart
+                  syncId={
+                    layoutMode === 'stacked'
+                      ? `results-${row.identifierAxisKind}`
+                      : undefined
+                  }
+                  margin={{
+                    top: 28,
+                    right: 28,
+                    bottom: showSharedXAxis ? 50 : 12,
+                    left: 14,
+                  }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.32} />
+                  <XAxis
+                    type="number"
+                    dataKey="x"
+                    domain={sharedXAxisDomain(labels)}
+                    allowDataOverflow
+                    ticks={showSharedXAxis ? ticks : []}
+                    tick={showSharedXAxis ? { fontSize: 10 } : false}
+                    tickLine={showSharedXAxis}
+                    axisLine={showSharedXAxis}
+                    height={showSharedXAxis ? 50 : 12}
+                    tickFormatter={(value) => labels.get(Number(value)) ?? ''}
+                    label={
+                      showSharedXAxis
+                        ? {
+                            value: `Identifier 2 · ${identifierAxisLabels[row.identifierAxisKind]}`,
+                            position: 'insideBottom',
+                            offset: -34,
+                            fontSize: 11,
+                          }
+                        : undefined
+                    }
+                  />
+                  <YAxis
+                    yAxisId="primary"
+                    type="number"
+                    dataKey="y"
+                    domain={primaryDomain}
+                    tick={{ fontSize: 10 }}
+                    tickCount={5}
+                    tickFormatter={(value) => formatNumber(Number(value), 2)}
+                    width={74}
+                    label={{
+                      value: `${metricLabel} (‰ VPDB)`,
+                      angle: -90,
+                      position: 'insideLeft',
+                      fontSize: 11,
+                    }}
+                  />
+                  <YAxis
+                    yAxisId="secondary"
+                    type="number"
+                    dataKey="y"
+                    orientation="right"
+                    tick={hasSecondary ? { fontSize: 10 } : false}
+                    tickLine={hasSecondary}
+                    axisLine={hasSecondary}
+                    tickCount={5}
+                    tickFormatter={(value) => formatNumber(Number(value), 2)}
+                    width={domainHasSecondary ? 86 : 0}
+                    label={
+                      hasSecondary
+                        ? {
+                            value: `Secondary · ${metricLabel} (‰ VPDB)`,
+                            angle: 90,
+                            position: 'insideRight',
+                            fontSize: 11,
+                          }
+                        : undefined
+                    }
+                  />
+                  <Tooltip
+                    content={<RechartsResultTooltip metric={metric} />}
+                  />
+                  {row.series.map(
+                    ({ series, points, seriesIndex, setting }) => (
+                      <Scatter
+                        key={series}
+                        name={series}
+                        data={points}
+                        yAxisId={setting.axis}
+                        fill={
+                          speciesColours[seriesIndex % speciesColours.length]
+                        }
+                        line={
+                          showLine
+                            ? {
+                                stroke:
+                                  speciesColours[
+                                    seriesIndex % speciesColours.length
+                                  ],
+                                strokeWidth: 1.5,
+                                strokeDasharray:
+                                  rechartsLineStyles[
+                                    seriesIndex % rechartsLineStyles.length
+                                  ],
+                              }
+                            : false
+                        }
+                        shape={(shapeProps: unknown) => {
+                          const point = shapeProps as {
+                            cx?: number;
+                            cy?: number;
+                            fill?: string;
+                          };
+                          return showSymbols &&
+                            point.cx !== undefined &&
+                            point.cy !== undefined ? (
+                            <circle
+                              cx={point.cx}
+                              cy={point.cy}
+                              r={symbolSize}
+                              fill={point.fill}
+                              stroke="white"
+                              strokeWidth={1}
+                            />
+                          ) : (
+                            <g />
+                          );
+                        }}
+                      />
+                    )
+                  )}
+                  {rowIndex === 0 && showPrecision && precisionPoint ? (
+                    <Scatter
+                      name={precisionPoint.species}
+                      data={[{ ...precisionPoint, x: firstX }]}
+                      yAxisId="primary"
+                      fill="#334155"
+                      legendType="line"
+                    >
+                      <ErrorBar
+                        dataKey="uncertainty"
+                        direction="y"
+                        width={10}
+                        stroke="#334155"
+                        strokeWidth={1.5}
+                      />
+                    </Scatter>
+                  ) : null}
+                </ScatterChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+        );
+      })}
     </div>
   );
 }
 
 function ResizableTableViewport({ children }: { children: React.ReactNode }) {
-  const [height, setHeight] = useState(520);
+  const [height, setHeight] = useState(360);
   const dragStart = useRef<{ y: number; height: number } | null>(null);
 
   function startResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -693,7 +1305,10 @@ function ResizableTableViewport({ children }: { children: React.ReactNode }) {
     setHeight(
       Math.min(
         1_000,
-        Math.max(260, dragStart.current.height + event.clientY - dragStart.current.y)
+        Math.max(
+          260,
+          dragStart.current.height + event.clientY - dragStart.current.y
+        )
       )
     );
   }
@@ -707,7 +1322,7 @@ function ResizableTableViewport({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-      <div className="overflow-auto" style={{ height }}>
+      <div className="[&_.workspace-table]:h-full [&_.workspace-table]:max-h-none" style={{ height }}>
         {children}
       </div>
       <div
@@ -736,6 +1351,115 @@ function ResizableTableViewport({ children }: { children: React.ReactNode }) {
   );
 }
 
+function ResizableChartViewport({
+  children,
+}: {
+  children: (height: number, width: number, dark: boolean) => React.ReactNode;
+}) {
+  const defaultHeight = 320;
+  const minimumHeight = 260;
+  const maximumHeight = 1_200;
+  const [height, setHeight] = useState(defaultHeight);
+  const [width, setWidth] = useState(640);
+  const [dark, setDark] = useState(false);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const dragStart = useRef<{ y: number; height: number } | null>(null);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const measure = () => setWidth(viewport.clientWidth);
+    const updateTheme = () =>
+      setDark(document.documentElement.classList.contains('dark'));
+    measure();
+    updateTheme();
+    const resizeObserver = new ResizeObserver(measure);
+    resizeObserver.observe(viewport);
+    const themeObserver = new MutationObserver(updateTheme);
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+    return () => {
+      resizeObserver.disconnect();
+      themeObserver.disconnect();
+    };
+  }, []);
+
+  function clampHeight(value: number) {
+    return Math.min(maximumHeight, Math.max(minimumHeight, value));
+  }
+
+  function startResize(event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    dragStart.current = { y: event.clientY, height };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!dragStart.current) return;
+    setHeight(
+      clampHeight(
+        dragStart.current.height + event.clientY - dragStart.current.y
+      )
+    );
+  }
+
+  function stopResize(event: ReactPointerEvent<HTMLDivElement>) {
+    dragStart.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  return (
+    <div className="min-w-0">
+      <div ref={viewportRef} className="min-w-0 overflow-auto" style={{ height }}>
+        {children(height, width, dark)}
+      </div>
+      <div
+        role="separator"
+        aria-label="Resize results chart"
+        aria-orientation="horizontal"
+        aria-valuemin={minimumHeight}
+        aria-valuemax={maximumHeight}
+        aria-valuenow={height}
+        tabIndex={0}
+        title="Drag to resize the chart. Double-click to reset."
+        onDoubleClick={() => setHeight(defaultHeight)}
+        onPointerDown={startResize}
+        onPointerMove={moveResize}
+        onPointerUp={stopResize}
+        onPointerCancel={stopResize}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            setHeight((value) => clampHeight(value + 40));
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            setHeight((value) => clampHeight(value - 40));
+          } else if (event.key === 'Home') {
+            event.preventDefault();
+            setHeight(minimumHeight);
+          } else if (event.key === 'End') {
+            event.preventDefault();
+            setHeight(maximumHeight);
+          }
+        }}
+        className="group grid h-7 touch-none cursor-row-resize place-items-center border-t bg-muted/30 text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <span className="flex items-center gap-2 text-[11px]">
+          <GripHorizontal
+            className="h-4 w-4 transition-colors group-hover:text-foreground"
+            aria-hidden="true"
+          />
+          Drag to resize · {height}px
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function ResultsDashboard() {
   const queryClient = useQueryClient();
   const sourceDocumentLinkHandled = useRef(false);
@@ -745,16 +1469,18 @@ export function ResultsDashboard() {
   const [fileInputKey, setFileInputKey] = useState(0);
   const [status, setStatus] = useState('');
   const [metric, setMetric] = useState<'carbon' | 'oxygen'>('carbon');
-  const [usePlotly, setUsePlotly] = useState(false);
+  const [chartLibrary, setChartLibrary] = useState<ChartLibrary>('plotly');
+  const [plotLayoutMode, setPlotLayoutMode] =
+    useState<PlotLayoutMode>('overlay');
+  const [seriesSettings, setSeriesSettings] = useState<
+    Record<string, SeriesSetting>
+  >({});
   const [corrected, setCorrected] = useState(true);
   const [showLine, setShowLine] = useState(true);
   const [showSymbols, setShowSymbols] = useState(true);
   const [showPrecision, setShowPrecision] = useState(true);
-  const [symbolSize, setSymbolSize] = useState(5);
-  const [zoomRange, setZoomRange] = useState<{
-    startIndex: number;
-    endIndex: number;
-  } | null>(null);
+  const [symbolSize, setSymbolSize] = useState(3);
+  const [plotSeriesExpanded, setPlotSeriesExpanded] = useState(false);
 
   const resultsQuery = useQuery({
     queryKey: ['result-register', filters],
@@ -776,9 +1502,13 @@ export function ResultsDashboard() {
       setFileInputKey((value) => value + 1);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['result-register'] }),
-        queryClient.invalidateQueries({ queryKey: ['result-register-options'] }),
+        queryClient.invalidateQueries({
+          queryKey: ['result-register-options'],
+        }),
         queryClient.invalidateQueries({ queryKey: ['client-manager'] }),
-        queryClient.invalidateQueries({ queryKey: ['operations-header-summary'] }),
+        queryClient.invalidateQueries({
+          queryKey: ['operations-header-summary'],
+        }),
       ]);
     },
     onError: (error: Error) => setStatus(error.message),
@@ -787,13 +1517,16 @@ export function ResultsDashboard() {
   const syncMutation = useMutation({
     mutationFn: syncResultsFolder,
     onSuccess: async (payload) => {
-      const issueCount = (payload.errors?.length ?? 0) + (payload.warnings?.length ?? 0);
+      const issueCount =
+        (payload.errors?.length ?? 0) + (payload.warnings?.length ?? 0);
       setStatus(
         `${payload.totalFiles} files checked, ${payload.importedFiles} imported, ${payload.skippedFiles} unchanged${issueCount ? `, ${issueCount} notices` : ''}.`
       );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['result-register'] }),
-        queryClient.invalidateQueries({ queryKey: ['result-register-options'] }),
+        queryClient.invalidateQueries({
+          queryKey: ['result-register-options'],
+        }),
         queryClient.invalidateQueries({ queryKey: ['client-manager'] }),
       ]);
     },
@@ -801,7 +1534,10 @@ export function ResultsDashboard() {
   });
 
   const data = resultsQuery.data;
-  const resultFiles = useMemo(() => data?.resultFiles ?? [], [data?.resultFiles]);
+  const resultFiles = useMemo(
+    () => data?.resultFiles ?? [],
+    [data?.resultFiles]
+  );
   const measurements = useMemo(
     () => data?.measurements ?? [],
     [data?.measurements]
@@ -818,8 +1554,9 @@ export function ResultsDashboard() {
 
   useEffect(() => {
     setLinkedSourceDocumentId(
-      new URLSearchParams(window.location.search).get('sourceDocumentId')?.trim() ??
-        ''
+      new URLSearchParams(window.location.search)
+        .get('sourceDocumentId')
+        ?.trim() ?? ''
     );
   }, []);
 
@@ -868,9 +1605,7 @@ export function ResultsDashboard() {
   const clientOptions = useMemo(
     () =>
       countOptions(
-        optionRows.filter((row) =>
-          rowMatchesFilters(row, filters, 'clientId')
-        ),
+        optionRows.filter((row) => rowMatchesFilters(row, filters, 'clientId')),
         (row) => row.client_id,
         (value) => clientById.get(value) ?? value
       ),
@@ -893,9 +1628,7 @@ export function ResultsDashboard() {
   const speciesOptions = useMemo(
     () =>
       countOptions(
-        optionRows.filter((row) =>
-          rowMatchesFilters(row, filters, 'species')
-        ),
+        optionRows.filter((row) => rowMatchesFilters(row, filters, 'species')),
         (row) => row.species
       ),
     [filters, optionRows]
@@ -937,8 +1670,10 @@ export function ResultsDashboard() {
       filters.identifier2.length > 0;
     return resultFiles.filter(
       (file) =>
-        (!filters.clientId.length || filters.clientId.includes(file.client_id)) &&
-        (!filters.resultFileId.length || filters.resultFileId.includes(file.id)) &&
+        (!filters.clientId.length ||
+          filters.clientId.includes(file.client_id)) &&
+        (!filters.resultFileId.length ||
+          filters.resultFileId.includes(file.id)) &&
         (!scientificFilterActive ||
           optionRows.length === 0 ||
           matchingFileIds.has(file.id))
@@ -960,18 +1695,30 @@ export function ResultsDashboard() {
         numeric: true,
       });
     });
-    const sequenceValues = Array.from(
-      new Set(sorted.map((measurement) => measurement.identifier_2))
-    );
-    const sequenceIndex = new Map(
-      sequenceValues.map((identifier, index) => [identifier, index + 1])
-    );
+    const sequenceIndexByKind = new Map<
+      IdentifierAxisKind,
+      Map<string, number>
+    >();
+    identifierAxisOrder.forEach((kind) => {
+      const values = Array.from(
+        new Set(
+          sorted
+            .filter(
+              (measurement) =>
+                classifyIdentifier2(measurement.identifier_2) === kind
+            )
+            .map((measurement) => measurement.identifier_2)
+        )
+      );
+      sequenceIndexByKind.set(
+        kind,
+        new Map(values.map((identifier, index) => [identifier, index + 1]))
+      );
+    });
     const groups = new Map<string, ChartPoint[]>();
     sorted.forEach((measurement) => {
       const rawValue =
-        metric === 'carbon'
-          ? measurement.d13c_value
-          : measurement.d18o_value;
+        metric === 'carbon' ? measurement.d13c_value : measurement.d18o_value;
       const correctedValue =
         metric === 'carbon'
           ? measurement.corrected_d13c
@@ -980,20 +1727,40 @@ export function ResultsDashboard() {
         metric === 'carbon'
           ? measurement.d13c_uncertainty
           : measurement.d18o_uncertainty;
-      const value = corrected ? correctedValue ?? rawValue : rawValue;
+      const value = corrected ? (correctedValue ?? rawValue) : rawValue;
       if (value === null) return;
       const species = measurement.species || 'Unspecified species';
-      const points = groups.get(species) ?? [];
+      const identifier1 =
+        measurement.identifier_1.trim() || 'Unspecified Identifier 1';
+      const identifierAxisKind = classifyIdentifier2(measurement.identifier_2);
+      const numericPosition =
+        identifierAxisKind === 'numeric'
+          ? numericIdentifier2Position(measurement.identifier_2)
+          : null;
+      const sequenceVariant =
+        identifierAxisKind === 'numeric'
+          ? numericIdentifier2Variant(measurement.identifier_2)
+          : '';
+      const series = `${species} · ${identifier1} · ${identifierAxisLabels[identifierAxisKind]}${
+        sequenceVariant ? ` · ${sequenceVariant}` : ''
+      }`;
+      const points = groups.get(series) ?? [];
       points.push({
-        x: sequenceIndex.get(measurement.identifier_2) ?? points.length + 1,
+        x:
+          numericPosition ??
+          sequenceIndexByKind
+            .get(identifierAxisKind)
+            ?.get(measurement.identifier_2) ??
+          points.length + 1,
         y: Number(value),
         uncertainty:
           uncertainty === null ? null : Math.abs(Number(uncertainty)),
-        identifier1: measurement.identifier_1,
+        identifier1,
         identifier2: measurement.identifier_2,
         species,
+        identifierAxisKind,
       });
-      groups.set(species, points);
+      groups.set(series, points);
     });
     return Array.from(groups.entries());
   }, [corrected, measurements, metric]);
@@ -1002,6 +1769,19 @@ export function ResultsDashboard() {
     () => chartGroups.flatMap(([, points]) => points),
     [chartGroups]
   );
+
+  useEffect(() => {
+    setSeriesSettings((current) => {
+      const next: Record<string, SeriesSetting> = {};
+      chartGroups.forEach(([series]) => {
+        next[series] = current[series] ?? {
+          visible: true,
+          axis: 'primary',
+        };
+      });
+      return next;
+    });
+  }, [chartGroups]);
 
   const precisionPoint = useMemo(() => {
     if (!chartPoints.length) return null;
@@ -1035,7 +1815,10 @@ export function ResultsDashboard() {
       candidates.length % 2
         ? candidates[middle]
         : (candidates[middle - 1] + candidates[middle]) / 2;
-    const xValues = chartPoints.map((point) => point.x);
+    const identifierAxisKind = chartPoints[0].identifierAxisKind;
+    const xValues = chartPoints
+      .filter((point) => point.identifierAxisKind === identifierAxisKind)
+      .map((point) => point.x);
     const yValues = chartPoints.map((point) => point.y);
     const yMin = Math.min(...yValues);
     const yMax = Math.max(...yValues);
@@ -1046,67 +1829,27 @@ export function ResultsDashboard() {
       identifier1: 'Standard precision',
       identifier2: 'Reference',
       species: `Standard precision +/- ${formatNumber(precision)} per mil`,
+      identifierAxisKind,
       isPrecision: true,
     } satisfies ChartPoint;
   }, [chartPoints, measurements, metric]);
 
   const xAxisLabels = useMemo(() => {
-    const labels = new Map<number, string>();
-    chartGroups.forEach(([, points]) =>
-      points.forEach((point) => labels.set(point.x, point.identifier2))
-    );
+    const labels = new Map<IdentifierAxisKind, Map<number, string>>();
+    identifierAxisOrder.forEach((kind) => labels.set(kind, new Map()));
+    chartGroups.forEach(([, points]) => {
+      points.forEach((point) => {
+        const axisLabels = labels.get(point.identifierAxisKind);
+        const currentLabel = axisLabels?.get(point.x);
+        const currentLength = currentLabel?.replace(/\s+/g, '').length ?? Infinity;
+        const candidateLength = point.identifier2.replace(/\s+/g, '').length;
+        if (!currentLabel || candidateLength < currentLength) {
+          axisLabels?.set(point.x, point.identifier2);
+        }
+      });
+    });
     return labels;
   }, [chartGroups]);
-
-  const zoomData = useMemo(
-    () =>
-      Array.from(xAxisLabels, ([x, label]) => ({ x, label })).sort(
-        (first, second) => first.x - second.x
-      ),
-    [xAxisLabels]
-  );
-  const visibleXRange = useMemo(() => {
-    if (!zoomData.length) return null;
-    const start =
-      zoomRange?.startIndex === undefined
-        ? 0
-        : Math.min(zoomRange.startIndex, zoomData.length - 1);
-    const end =
-      zoomRange?.endIndex === undefined
-        ? zoomData.length - 1
-        : Math.min(zoomRange.endIndex, zoomData.length - 1);
-    return [zoomData[start].x, zoomData[end].x] as const;
-  }, [zoomData, zoomRange]);
-  const visibleChartGroups = useMemo(
-    () =>
-      visibleXRange
-        ? chartGroups.map(([species, points]) => [
-            species,
-            points.filter(
-              (point) =>
-                point.x >= visibleXRange[0] && point.x <= visibleXRange[1]
-            ),
-          ] as [string, ChartPoint[]])
-        : chartGroups,
-    [chartGroups, visibleXRange]
-  );
-  const displayPrecisionPoint = useMemo(
-    () =>
-      precisionPoint && visibleXRange
-        ? { ...precisionPoint, x: visibleXRange[0] }
-        : precisionPoint,
-    [precisionPoint, visibleXRange]
-  );
-
-  useEffect(() => {
-    setZoomRange(null);
-  }, [
-    filters.clientId,
-    filters.resultFileId,
-    filters.identifier1,
-    filters.identifier2,
-    filters.species,
-  ]);
 
   function clearSearch() {
     setFilters({
@@ -1116,6 +1859,10 @@ export function ResultsDashboard() {
       clientId: [],
       resultFileId: [],
     });
+  }
+
+  function updateSeriesSetting(series: string, setting: SeriesSetting) {
+    setSeriesSettings((current) => ({ ...current, [series]: setting }));
   }
 
   function exploreFile(file: ResultFile) {
@@ -1129,10 +1876,9 @@ export function ResultsDashboard() {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-workspace">
       <PageHeader
         title="Results register"
-        description="Import stable carbon and oxygen isotope workbooks, find measurements by record identifiers and species, and inspect analytical sequences."
         actions={
           <Button
             variant="outline"
@@ -1142,12 +1888,14 @@ export function ResultsDashboard() {
             <RefreshCw
               className={`mr-1.5 h-4 w-4 ${syncMutation.isPending ? 'animate-spin' : ''}`}
             />
-            Process Results folder
+            {process.env.NEXT_PUBLIC_HOSTED === '1' ? 'Process saved workbooks' : 'Process Results folder'}
           </Button>
         }
       />
 
-      <Toolbar className="space-y-3">
+      <details className="rounded-md border bg-card">
+        <summary className="cursor-pointer px-panel py-2 text-xs font-medium">Import result workbook</summary>
+      <Toolbar className="space-y-2 rounded-none border-0 border-t">
         <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
           <Input
             key={fileInputKey}
@@ -1162,12 +1910,15 @@ export function ResultsDashboard() {
             disabled={!uploadFile || uploadMutation.isPending}
           >
             <Upload className="mr-1.5 h-4 w-4" />
-            {uploadMutation.isPending ? 'Parsing workbook…' : 'Upload and import'}
+            {uploadMutation.isPending
+              ? 'Parsing workbook…'
+              : 'Upload and import'}
           </Button>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
           <span>
-            The filename is used to match or create the client; the original workbook is retained as a result document.
+            The filename is used to match or create the client; the original
+            workbook is retained as a result document.
           </span>
           {status ? (
             <span aria-live="polite" className="font-medium text-foreground">
@@ -1176,6 +1927,7 @@ export function ResultsDashboard() {
           ) : null}
         </div>
       </Toolbar>
+      </details>
 
       {data?.warnings?.map((warning) => (
         <p
@@ -1197,129 +1949,176 @@ export function ResultsDashboard() {
           }
         />
       ) : (
-        <>
-          <div className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
+          <div className="grid items-start gap-workspace xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
             <SectionPanel
-              title="Search results"
-              description="Select one or more items in any field; each choice narrows the available options."
+              title="Filter workspace"
+              className="xl:col-span-2"
+              description="Every available value stays visible. Check rows to include them; each selection narrows the neighboring tables."
+              actions={
+                <div className="flex items-center gap-3">
+                  <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                    {(data?.measurementCount ?? 0).toLocaleString()} matches
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={clearSearch}
+                    disabled={!hasChartSelection}
+                  >
+                    <FilterX className="mr-1.5 h-3.5 w-3.5" />
+                    Clear filters
+                  </Button>
+                </div>
+              }
             >
-              <div className="space-y-3">
-                <SearchableDropdown
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                <FilterTable
                   id="result-client-filter"
                   label="Client"
                   options={clientOptions}
                   value={filters.clientId}
-                  multiple
                   onChange={(value) =>
                     setFilters({
                       ...emptyFilters,
-                      clientId: value as string[],
+                      clientId: value,
                     })
                   }
-                  placeholder={
-                    optionsQuery.isLoading ? 'Loading clients…' : 'All clients'
-                  }
+                  loading={optionsQuery.isLoading}
                 />
-                <SearchableDropdown
+                <FilterTable
                   id="result-file-filter"
                   label="Result file"
                   options={fileOptions}
                   value={filters.resultFileId}
-                  multiple
                   onChange={(value) =>
                     setFilters((current) => ({
                       ...current,
-                      resultFileId: value as string[],
+                      resultFileId: value,
                       species: [],
                       identifier1: [],
                       identifier2: [],
                     }))
                   }
-                  placeholder="Select one or more result files"
+                  loading={optionsQuery.isLoading}
                 />
-                <SearchableDropdown
+                <FilterTable
                   id="result-species-filter"
                   label="Species"
                   options={speciesOptions}
                   value={filters.species}
-                  multiple
                   onChange={(value) =>
                     setFilters((current) => ({
                       ...current,
-                      species: value as string[],
+                      species: value,
                       identifier1: [],
                       identifier2: [],
                     }))
                   }
-                  placeholder="Select one or more species"
+                  loading={optionsQuery.isLoading}
                 />
-                <SearchableDropdown
+                <FilterTable
                   id="result-identifier-1-filter"
                   label="Identifier 1"
                   options={identifier1Options}
                   value={filters.identifier1}
-                  multiple
                   onChange={(value) =>
                     setFilters((current) => ({
                       ...current,
-                      identifier1: value as string[],
+                      identifier1: value,
                       identifier2: [],
                     }))
                   }
-                  placeholder="Sediment core or record ID"
+                  loading={optionsQuery.isLoading}
                 />
-                <SearchableDropdown
+                <FilterTable
                   id="result-identifier-2-filter"
                   label="Identifier 2"
                   options={identifier2Options}
                   value={filters.identifier2}
-                  multiple
                   onChange={(value) =>
                     setFilters((current) => ({
                       ...current,
-                      identifier2: value as string[],
+                      identifier2: value,
                     }))
                   }
-                  placeholder="Sample number or depth"
+                  loading={optionsQuery.isLoading}
                 />
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="w-full"
-                  onClick={clearSearch}
-                >
-                  <FilterX className="mr-1.5 h-4 w-4" />
-                  Clear all filters
-                </Button>
-                <p className="text-[11px] leading-5 text-muted-foreground">
-                  {data?.measurementCount ?? 0} measurements match.
-                  {data?.truncated
-                    ? ' Refine the fields to narrow the 1,000-row preview.'
-                    : ''}
-                </p>
               </div>
+              {data?.truncated ? (
+                <p className="mt-3 text-[11px] leading-5 text-muted-foreground">
+                  The measurement preview is limited to 1,000 rows. Refine the
+                  tables to narrow the result set.
+                </p>
+              ) : null}
             </SectionPanel>
 
+            <ChartLegend
+              groups={hasChartSelection ? chartGroups : []}
+              settings={seriesSettings}
+              onChange={updateSeriesSetting}
+              chartLibrary={chartLibrary}
+              showLine={showLine}
+              showSymbols={showSymbols}
+              precisionPoint={hasChartSelection && showPrecision ? precisionPoint : null}
+            />
+
             <SectionPanel
-              title="Isotope sequence"
-              description="Line and symbols follow Identifier 2; colour and stroke pattern separate species. Drag the lower navigator to zoom."
+              title="Plot builder"
+              description="Series with the same Identifier 2 axis combine automatically, or can be split into aligned charts."
               actions={
                 <div className="flex flex-wrap items-center gap-2">
                   <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={usePlotly}
-                      onChange={(event) => setUsePlotly(event.target.checked)}
-                      className="h-3.5 w-3.5 accent-blue-600"
-                    />
-                    Plotly chart
+                    Chart library
+                    <select
+                      value={chartLibrary}
+                      onChange={(event) =>
+                        setChartLibrary(event.target.value as ChartLibrary)
+                      }
+                      className={cn(selectClassName, 'h-7 w-auto min-w-24 py-0 text-[11px]')}
+                    >
+                      <option value="plotly">Plotly</option>
+                      <option value="recharts">Recharts</option>
+                    </select>
                   </label>
+                  <div
+                    className="inline-flex rounded-md border bg-background p-0.5"
+                    aria-label="Plot layout"
+                  >
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={
+                        plotLayoutMode === 'overlay' ? 'secondary' : 'ghost'
+                      }
+                      className="h-7 px-2 text-[11px]"
+                      onClick={() => setPlotLayoutMode('overlay')}
+                      aria-pressed={plotLayoutMode === 'overlay'}
+                    >
+                      <Axis3D className="mr-1.5 h-3.5 w-3.5" />
+                      Combined
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={
+                        plotLayoutMode === 'stacked' ? 'secondary' : 'ghost'
+                      }
+                      className="h-7 px-2 text-[11px]"
+                      onClick={() => setPlotLayoutMode('stacked')}
+                      aria-pressed={plotLayoutMode === 'stacked'}
+                    >
+                      <Rows3 className="mr-1.5 h-3.5 w-3.5" />
+                      Stacked charts
+                    </Button>
+                  </div>
                   <div className="flex rounded-md border bg-muted/30 p-0.5">
                     <Button
                       size="sm"
                       variant={metric === 'carbon' ? 'secondary' : 'ghost'}
                       className="h-7 px-2 text-[11px]"
                       onClick={() => setMetric('carbon')}
+                      aria-pressed={metric === 'carbon'}
                     >
                       δ13C
                     </Button>
@@ -1328,6 +2127,7 @@ export function ResultsDashboard() {
                       variant={metric === 'oxygen' ? 'secondary' : 'ghost'}
                       className="h-7 px-2 text-[11px]"
                       onClick={() => setMetric('oxygen')}
+                      aria-pressed={metric === 'oxygen'}
                     >
                       δ18O
                     </Button>
@@ -1373,8 +2173,10 @@ export function ResultsDashboard() {
                     Symbol size
                     <select
                       value={symbolSize}
-                      onChange={(event) => setSymbolSize(Number(event.target.value))}
-                      className={`${selectClassName} h-7 w-16 py-0 text-[11px]`}
+                      onChange={(event) =>
+                        setSymbolSize(Number(event.target.value))
+                      }
+                      className={cn(selectClassName, 'h-7 w-16 py-0 text-[11px]')}
                     >
                       {[3, 4, 5, 6, 8, 10].map((size) => (
                         <option key={size} value={size}>
@@ -1387,7 +2189,9 @@ export function ResultsDashboard() {
                     <input
                       type="checkbox"
                       checked={showPrecision}
-                      onChange={(event) => setShowPrecision(event.target.checked)}
+                      onChange={(event) =>
+                        setShowPrecision(event.target.checked)
+                      }
                       className="h-3.5 w-3.5 accent-blue-600"
                     />
                     Standard precision
@@ -1395,269 +2199,188 @@ export function ResultsDashboard() {
                 </div>
               }
             >
-              {usePlotly ? (
-                <PlotlySequenceChart
-                  groups={hasChartSelection ? visibleChartGroups : []}
-                  precisionPoint={
-                    hasChartSelection ? displayPrecisionPoint : null
-                  }
-                  metric={metric}
-                  showLine={showLine}
-                  showSymbols={showSymbols}
-                  showPrecision={showPrecision}
-                  symbolSize={symbolSize}
-                  xAxisLabels={hasChartSelection ? xAxisLabels : new Map()}
-                  hasSelection={hasChartSelection}
-                />
-              ) : hasChartSelection && chartGroups.length ? (
-                <div className="h-[450px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <ScatterChart
-                      data={zoomData}
-                      margin={{ top: 8, right: 12, bottom: 54, left: 4 }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" opacity={0.32} />
-                      <XAxis
-                        type="number"
-                        dataKey="x"
-                        name="Identifier 2"
-                        domain={
-                          visibleXRange
-                            ? [visibleXRange[0], visibleXRange[1]]
-                            : ['dataMin', 'dataMax']
-                        }
-                        allowDataOverflow
-                        tick={{ fontSize: 10 }}
-                        tickFormatter={(value) =>
-                          xAxisLabels.get(Number(value)) ?? ''
-                        }
-                        label={{
-                          value: 'Identifier 2 · sample number or depth',
-                          position: 'insideBottom',
-                          offset: -20,
-                          fontSize: 11,
-                        }}
+              <div className="space-y-2">
+                <div className="overflow-hidden rounded-md border">
+                  <button
+                    type="button"
+                    className="flex w-full flex-wrap items-center justify-between gap-2 bg-slate-50 px-2 py-1.5 text-left transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring dark:bg-slate-900 dark:hover:bg-slate-800"
+                    aria-expanded={plotSeriesExpanded}
+                    aria-controls="plot-series-settings"
+                    onClick={() => setPlotSeriesExpanded((value) => !value)}
+                  >
+                    <span className="min-w-0">
+                      <span className="block text-xs font-semibold">
+                        Plot series
+                      </span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-2">
+                      <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                        {hasChartSelection
+                          ? chartGroups.filter(
+                              ([series]) =>
+                                seriesSettings[series]?.visible ?? true
+                            ).length
+                          : 0}{' '}
+                        of {hasChartSelection ? chartGroups.length : 0} included
+                      </span>
+                      <ChevronDown
+                        className={`h-4 w-4 text-muted-foreground transition-transform ${
+                          plotSeriesExpanded ? 'rotate-180' : ''
+                        }`}
+                        aria-hidden="true"
                       />
-                      <YAxis
-                        type="number"
-                        dataKey="y"
-                        name={metric === 'carbon' ? 'δ13C' : 'δ18O'}
-                        unit=" ‰"
-                        tick={{ fontSize: 10 }}
-                        width={70}
-                        label={{
-                          value: `${metric === 'carbon' ? 'δ13C' : 'δ18O'} (‰ VPDB)`,
-                          angle: -90,
-                          position: 'insideLeft',
-                          fontSize: 11,
-                        }}
+                    </span>
+                  </button>
+                  {plotSeriesExpanded ? (
+                    <div id="plot-series-settings" className="border-t">
+                      <p className="px-2 py-1 text-[11px] text-muted-foreground">Configure included series and shared or secondary axes.</p>
+                      <SeriesConfigurationTable
+                        groups={hasChartSelection ? chartGroups : []}
+                        settings={seriesSettings}
+                        onChange={updateSeriesSetting}
                       />
-                      <Tooltip
-                        content={<ResultTooltip metric={metric} />}
-                        cursor={{ strokeDasharray: '3 3' }}
-                      />
-                      <Legend
-                        verticalAlign="top"
-                        align="right"
-                        wrapperStyle={{ fontSize: 11, paddingBottom: 12 }}
-                      />
-                      {visibleChartGroups.map(([species, points], index) => (
-                        <Scatter
-                          key={species}
-                          name={species}
-                          data={points}
-                          fill={speciesColours[index % speciesColours.length]}
-                          line={
-                            showLine
-                              ? {
-                                  stroke:
-                                    speciesColours[
-                                      index % speciesColours.length
-                                    ],
-                                  strokeWidth: 1.5,
-                                  strokeDasharray:
-                                    speciesLineStyles[
-                                      index % speciesLineStyles.length
-                                    ],
-                                }
-                              : false
-                          }
-                          shape={(shapeProps: unknown) => {
-                            const point = shapeProps as {
-                              cx?: number;
-                              cy?: number;
-                              fill?: string;
-                            };
-                            return showSymbols &&
-                              point.cx !== undefined &&
-                              point.cy !== undefined ? (
-                              <circle
-                                cx={point.cx}
-                                cy={point.cy}
-                                r={symbolSize}
-                                fill={point.fill}
-                                stroke="white"
-                                strokeWidth={1}
-                              />
-                            ) : (
-                              <g />
-                            );
-                          }}
-                        />
-                      ))}
-                      {showPrecision && displayPrecisionPoint ? (
-                        <Scatter
-                          name={displayPrecisionPoint.species}
-                          data={[displayPrecisionPoint]}
-                          fill="#334155"
-                          legendType="line"
-                          shape={(shapeProps: unknown) => {
-                            const point = shapeProps as {
-                              cx?: number;
-                              cy?: number;
-                            };
-                            return point.cx !== undefined &&
-                              point.cy !== undefined ? (
-                              <circle
-                                cx={point.cx}
-                                cy={point.cy}
-                                r={2.5}
-                                fill="#334155"
-                              />
-                            ) : (
-                              <g />
-                            );
-                          }}
-                        >
-                          <ErrorBar
-                            dataKey="uncertainty"
-                            direction="y"
-                            width={10}
-                            stroke="#334155"
-                            strokeWidth={1.5}
-                          />
-                        </Scatter>
-                      ) : null}
-                      <Brush
-                        data={zoomData}
-                        dataKey="x"
-                        height={24}
-                        stroke="#64748b"
-                        travellerWidth={8}
-                        startIndex={zoomRange?.startIndex}
-                        endIndex={zoomRange?.endIndex}
-                        onChange={(range) => {
-                          if (
-                            range.startIndex !== undefined &&
-                            range.endIndex !== undefined
-                          ) {
-                            setZoomRange({
-                              startIndex: range.startIndex,
-                              endIndex: range.endIndex,
-                            });
-                          }
-                        }}
-                        tickFormatter={(value) =>
-                          xAxisLabels.get(Number(value)) ?? ''
-                        }
-                      />
-                    </ScatterChart>
-                  </ResponsiveContainer>
+                    </div>
+                  ) : null}
                 </div>
-              ) : (
-                <BlankSequenceChart
-                  metric={metric}
-                  hasSelection={hasChartSelection}
-                />
-              )}
+                <div className="min-w-0 overflow-hidden rounded-md border bg-slate-50/40 dark:bg-slate-950/20">
+                  {hasChartSelection ? (
+                  <ResizableChartViewport>
+                    {(height, width, dark) =>
+                      chartLibrary === 'plotly' ? (
+                        <PlotlySequenceChart
+                          groups={hasChartSelection ? chartGroups : []}
+                          settings={seriesSettings}
+                          layoutMode={plotLayoutMode}
+                          precisionPoint={
+                            hasChartSelection ? precisionPoint : null
+                          }
+                          metric={metric}
+                          showLine={showLine}
+                          showSymbols={showSymbols}
+                          showPrecision={showPrecision}
+                          symbolSize={symbolSize}
+                          xAxisLabels={
+                            hasChartSelection ? xAxisLabels : new Map()
+                          }
+                          hasSelection={hasChartSelection}
+                          height={height}
+                          width={width}
+                          dark={dark}
+                        />
+                      ) : (
+                        <RechartsSequenceChart
+                          groups={hasChartSelection ? chartGroups : []}
+                          settings={seriesSettings}
+                          layoutMode={plotLayoutMode}
+                          precisionPoint={
+                            hasChartSelection ? precisionPoint : null
+                          }
+                          metric={metric}
+                          showLine={showLine}
+                          showSymbols={showSymbols}
+                          showPrecision={showPrecision}
+                          symbolSize={symbolSize}
+                          xAxisLabels={
+                            hasChartSelection ? xAxisLabels : new Map()
+                          }
+                          hasSelection={hasChartSelection}
+                          height={height}
+                          width={width}
+                        />
+                      )
+                    }
+                  </ResizableChartViewport>
+                  ) : (
+                    <EmptyState title="Choose data to plot" description="Select one or more items in the filter tables to plot measurements." />
+                  )}
+                </div>
+              </div>
             </SectionPanel>
-          </div>
-
-          <div className="grid items-start gap-5 xl:grid-cols-2">
             <SectionPanel
               title="Measurement results"
               description={`${Math.min(measurements.length, 300)} rows shown with source-file provenance.`}
               bodyClassName="p-0"
             >
-            {measurements.length ? (
-              <ResizableTableViewport>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Identifier 1</TableHead>
-                      <TableHead>Identifier 2</TableHead>
-                      <TableHead>Species</TableHead>
-                      <TableHead className="text-right">δ13C</TableHead>
-                      <TableHead className="text-right">δ18O</TableHead>
-                      <TableHead>Source</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {measurements.slice(0, 300).map((measurement) => {
-                      const file = fileById.get(measurement.result_file_id);
-                      return (
-                        <TableRow key={measurement.id}>
-                          <TableCell className="font-medium">
-                            {measurement.identifier_1}
-                          </TableCell>
-                          <TableCell className="font-mono tabular-nums">
-                            {measurement.identifier_2}
-                          </TableCell>
-                          <TableCell>{measurement.species ?? '—'}</TableCell>
-                          <TableCell className="text-right font-mono tabular-nums">
-                            {formatNumber(
-                              corrected
-                                ? measurement.corrected_d13c ??
-                                    measurement.d13c_value
-                                : measurement.d13c_value
-                            )}
-                          </TableCell>
-                          <TableCell className="text-right font-mono tabular-nums">
-                            {formatNumber(
-                              corrected
-                                ? measurement.corrected_d18o ??
-                                    measurement.d18o_value
-                                : measurement.d18o_value
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {file?.source_document ? (
-                              <a
-                                href={`/api/client-manager/documents/${file.source_document.id}`}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex max-w-64 items-center gap-1 truncate text-xs font-medium text-primary hover:underline"
-                              >
-                                {file.source_document.file_name}
-                                <Download className="h-3 w-3 shrink-0" />
-                              </a>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">
-                                Sheet {measurement.source_sheet}, row{' '}
-                                {measurement.source_row}
-                              </span>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              </ResizableTableViewport>
-            ) : (
-              <EmptyState
-                title="No measurements match"
-                description="Search by Identifier 1, Identifier 2, species, client, or result file."
-              />
-            )}
+              {measurements.length ? (
+                <ResizableTableViewport>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Identifier 1</TableHead>
+                        <TableHead>Identifier 2</TableHead>
+                        <TableHead>Species</TableHead>
+                        <TableHead className="text-right">δ13C</TableHead>
+                        <TableHead className="text-right">δ18O</TableHead>
+                        <TableHead>Source</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {measurements.slice(0, 300).map((measurement) => {
+                        const file = fileById.get(measurement.result_file_id);
+                        return (
+                          <TableRow key={measurement.id}>
+                            <TableCell className="font-medium">
+                              {measurement.identifier_1}
+                            </TableCell>
+                            <TableCell className="font-mono tabular-nums">
+                              {measurement.identifier_2}
+                            </TableCell>
+                            <TableCell>{measurement.species ?? '—'}</TableCell>
+                            <TableCell className="text-right font-mono tabular-nums">
+                              {formatNumber(
+                                corrected
+                                  ? (measurement.corrected_d13c ??
+                                      measurement.d13c_value)
+                                  : measurement.d13c_value
+                              )}
+                            </TableCell>
+                            <TableCell className="text-right font-mono tabular-nums">
+                              {formatNumber(
+                                corrected
+                                  ? (measurement.corrected_d18o ??
+                                      measurement.d18o_value)
+                                  : measurement.d18o_value
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {file?.source_document ? (
+                                <a
+                                  href={`/api/client-manager/documents/${file.source_document.id}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex max-w-64 items-center gap-1 truncate text-xs font-medium text-primary hover:underline"
+                                >
+                                  {file.source_document.file_name}
+                                  <Download className="h-3 w-3 shrink-0" />
+                                </a>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">
+                                  Sheet {measurement.source_sheet}, row{' '}
+                                  {measurement.source_row}
+                                </span>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </ResizableTableViewport>
+              ) : (
+                <EmptyState
+                  title={resultsQuery.isPending ? 'Loading measurements' : 'No measurements match'}
+                  description={resultsQuery.isPending ? 'Retrieving results for the selected filters.' : 'Search by Identifier 1, Identifier 2, species, client, or result file.'}
+                />
+              )}
             </SectionPanel>
 
             <SectionPanel
               title="Result files"
+              className="xl:col-span-2"
               description={`${filteredResultFiles.length} of ${resultFiles.length} parsed workbooks match the active search.`}
               bodyClassName="p-0"
             >
-            {filteredResultFiles.length ? (
+              {filteredResultFiles.length ? (
                 <Table
                   containerClassName="max-w-full"
                   className="min-w-[820px]"
@@ -1694,14 +2417,16 @@ export function ResultsDashboard() {
                             </div>
                           </div>
                         </TableCell>
-                        <TableCell>{file.client?.name ?? 'Unknown client'}</TableCell>
+                        <TableCell>
+                          {file.client?.name ?? 'Unknown client'}
+                        </TableCell>
                         <TableCell>{file.analysis_series}</TableCell>
                         <TableCell className="font-mono tabular-nums">
                           {file.result_date ?? '—'}
                         </TableCell>
                         <TableCell className="text-right font-mono tabular-nums">
                           {file.row_count.toLocaleString()}
-                          <p className="text-[10px] text-muted-foreground">
+                          <p className="text-[11px] text-muted-foreground">
                             {file.identifier_1_count} IDs · {file.species_count}{' '}
                             species
                           </p>
@@ -1746,23 +2471,22 @@ export function ResultsDashboard() {
                     ))}
                   </TableBody>
                 </Table>
-            ) : (
-              <EmptyState
-                title={
-                  resultFiles.length
-                    ? 'No result files match'
-                    : 'No result files yet'
-                }
-                description={
-                  resultFiles.length
-                    ? 'Clear or change the dependent search filters.'
-                    : 'Process the Results folder or upload an Excel workbook.'
-                }
-              />
-            )}
+              ) : (
+                <EmptyState
+                  title={
+                    resultFiles.length
+                      ? 'No result files match'
+                      : 'No result files yet'
+                  }
+                  description={
+                    resultFiles.length
+                      ? 'Clear or change the dependent search filters.'
+                      : 'Process the Results folder or upload an Excel workbook.'
+                  }
+                />
+              )}
             </SectionPanel>
           </div>
-        </>
       )}
     </div>
   );

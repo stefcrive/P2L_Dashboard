@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { storeCloudDocument, readCloudDocument } from '@/lib/cloud/files';
+import { getCloudDatabase } from '@/lib/cloud/database';
 
 import { NextResponse } from 'next/server';
 
@@ -29,7 +31,10 @@ const DATA_TABLES = [
   'client_invoices',
   'invoice_items',
   'equipment_assets',
+  'equipment_components',
   'lab_book_entries',
+  'sample_queue_items',
+  'sample_queue_segments',
   'backup_records',
 ] as const;
 
@@ -76,7 +81,7 @@ export async function GET() {
     return NextResponse.json({
       source,
       ...info,
-      sizeBytes: await directorySize(info.path),
+      sizeBytes: source === 'neon' ? Number((await database.query<{ bytes: number }>('SELECT pg_database_size(current_database()) AS bytes')).rows[0].bytes) : await directorySize(info.path),
       schemaVersion: migrationResult.rows[0]?.version ?? null,
       schemaAppliedAt: migrationResult.rows[0]?.applied_at ?? null,
       counts: Object.fromEntries(
@@ -100,6 +105,30 @@ export async function GET() {
 }
 
 export async function POST() {
+  if (getApplicationDatabaseSource() === 'neon') {
+    try {
+      const database = getCloudDatabase();
+      const snapshot = await database.transaction(async (tx) => {
+        await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+        const { rows: tables } = await tx.query<{ schemaname: string; tablename: string }>("SELECT schemaname, tablename FROM pg_tables WHERE schemaname IN ('public','kb','app_local') ORDER BY schemaname,tablename");
+        const records: Record<string, unknown[]> = {};
+        for (const table of tables) {
+          const quote = (name: string) => '"' + name.replace(/"/g, '""') + '"';
+          records[`${table.schemaname}.${table.tablename}`] = (await tx.query(`SELECT * FROM ${quote(table.schemaname)}.${quote(table.tablename)}`)).rows;
+        }
+        return { format: 'p2l-postgres-logical-export-v1', createdAt: new Date().toISOString(), tables: records };
+      });
+      const bytes = Buffer.from(JSON.stringify(snapshot));
+      const destination = await storeCloudDocument(bytes);
+      const stored = await readCloudDocument(destination);
+      if (!stored || !Buffer.from(stored).equals(bytes)) throw new Error('Backup verification failed.');
+      await database.query("INSERT INTO public.backup_records (system_name,backup_type,status,destination,size_bytes,verified,completed_at,notes) VALUES ('P2L Dashboard','database','completed',$1,$2,true,now(),'Verified logical table export in private Vercel Blob; document blobs remain separately stored.')", [destination, bytes.byteLength]);
+      return NextResponse.json({ source: 'neon', destination, sizeBytes: bytes.byteLength, verified: true });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : 'Unable to export the hosted database.' }, { status: 500 });
+    }
+  }
+
   if (getApplicationDatabaseSource() !== 'local') {
     return NextResponse.json(
       { error: 'Embedded database backups are available only in local mode.' },

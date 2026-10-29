@@ -59,7 +59,7 @@ export function TradingChatAssistant() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [conversation?.messages.length, error, open, pending]);
 
-  if (pathname === '/assistant') return null;
+  if (pathname === '/assistant' || pathname === '/knowledge') return null;
 
   return (
     <>
@@ -70,7 +70,7 @@ export function TradingChatAssistant() {
         >
           <header className="flex h-10 shrink-0 items-center justify-between border-b border-slate-200 px-3 dark:border-slate-800">
             <div className="flex items-center gap-2">
-              <span className="relative flex h-5 w-5 items-center justify-center rounded-md bg-sky-600 text-white">
+              <span className="relative flex h-5 w-5 items-center justify-center rounded-md bg-primary text-white">
                 <Sparkles className="h-3 w-3" />
               </span>
               <h2 className="font-display text-sm font-semibold text-slate-900 dark:text-slate-100">
@@ -79,7 +79,7 @@ export function TradingChatAssistant() {
             </div>
             <div className="flex items-center gap-0.5">
               <Link
-                href="/assistant"
+                href="/knowledge"
                 aria-label="Open full-page assistant"
                 title="Open full page"
                 className="grid h-7 w-7 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-slate-100"
@@ -114,7 +114,7 @@ export function TradingChatAssistant() {
               ))
             ) : (
               <div className="flex min-h-full flex-col justify-center py-8">
-                <Sparkles className="mb-3 h-5 w-5 text-sky-600" />
+                <Sparkles className="mb-3 h-5 w-5 text-primary" />
                 <h3 className="font-display text-base font-semibold text-slate-900 dark:text-slate-100">
                   Review the lab from here
                 </h3>
@@ -129,7 +129,7 @@ export function TradingChatAssistant() {
                       onClick={() =>
                         void sendAssistantMessage(suggestion, conversation?.id)
                       }
-                      className="flex w-full items-center justify-between border-b border-slate-200 py-2.5 text-left text-[12px] text-slate-700 last:border-b-0 hover:text-sky-600 dark:border-slate-800 dark:text-slate-300 dark:hover:text-sky-400"
+                      className="flex w-full items-center justify-between border-b border-slate-200 py-2.5 text-left text-[12px] text-slate-700 last:border-b-0 hover:text-primary dark:border-slate-800 dark:text-slate-300 dark:hover:text-primary"
                     >
                       {suggestion}
                       <span aria-hidden className="text-slate-300 dark:text-slate-700">
@@ -184,7 +184,7 @@ export function TradingChatAssistant() {
         className={`fixed bottom-5 right-5 grid h-11 w-11 place-items-center rounded-full text-white shadow-xl shadow-slate-950/30 transition-transform hover:scale-105 ${
           open
             ? 'z-[89] bg-slate-800 hover:bg-slate-700 dark:bg-slate-700 dark:hover:bg-slate-600'
-            : 'z-[90] bg-sky-600 hover:bg-sky-500'
+            : 'z-[90] bg-primary hover:bg-primary/90'
         }`}
       >
         {open ? <X className="h-5 w-5" /> : <MessageSquare className="h-5 w-5" />}

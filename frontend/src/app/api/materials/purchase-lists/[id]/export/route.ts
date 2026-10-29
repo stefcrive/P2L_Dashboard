@@ -5,7 +5,7 @@ import { getSupabaseAdminClient } from '@/lib/supabase/admin';
 
 export const runtime = 'nodejs';
 
-type RouteContext = { params: { id: string } };
+type RouteContext = { params: Promise<{ id: string }> };
 
 interface ExportItem {
   material_name_snapshot: string;
@@ -24,7 +24,8 @@ function csvCell(value: unknown): string {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-export async function GET(request: Request, { params }: RouteContext) {
+export async function GET(request: Request, { params: paramsPromise }: RouteContext) {
+  const params = await paramsPromise;
   const database = getSupabaseAdminClient();
   const { data: list, error: listError } = await database
     .from('material_purchase_lists')

@@ -6,8 +6,6 @@ import { ArrowRight, Database, RefreshCw } from 'lucide-react';
 
 import {
   EmptyState,
-  MetricRail,
-  MetricTile,
   PageHeader,
   SectionPanel,
   StatusPill,
@@ -23,7 +21,7 @@ import {
 } from '@/components/ui/table';
 
 type Summary = {
-  source: 'local' | 'supabase' | 'unavailable';
+  source: 'local' | 'supabase' | 'neon' | 'unavailable';
   error?: string;
   pendingResults: number;
   maintenanceDue: number;
@@ -87,6 +85,7 @@ export function OverviewDashboard() {
   });
   const summary = summaryQuery.data;
   const metrics = summary?.metrics;
+  if (summaryQuery.isPending) return <div role="status" className="rounded-md border bg-card p-4 text-muted-foreground">Loading laboratory operations…</div>;
 
   const workQueue = [
     {
@@ -119,12 +118,25 @@ export function OverviewDashboard() {
     },
   ] as const;
 
+  if (summaryQuery.isPending || summaryQuery.isError) {
+    return (
+      <div className="space-y-workspace">
+        <PageHeader eyebrow="Laboratory operations" title="Operations overview" />
+        <EmptyState
+          error={summaryQuery.isError}
+          title={summaryQuery.isPending ? 'Loading operations' : 'Operations could not be loaded'}
+          description={summaryQuery.isPending ? 'Retrieving laboratory activity and metrics.' : summaryQuery.error.message}
+          action={summaryQuery.isError ? <Button variant="outline" onClick={() => summaryQuery.refetch()}>Retry</Button> : undefined}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <PageHeader
         eyebrow="Laboratory operations"
         title="Operations overview"
-        description="See client work, laboratory readiness, purchasing pressure, and record integrity in one place."
         actions={
           <>
             <Button
@@ -146,37 +158,6 @@ export function OverviewDashboard() {
         }
       />
 
-      <MetricRail className="md:grid-cols-4">
-        <MetricTile
-          label="Active clients"
-          value={metrics?.clients ?? 0}
-          detail={`${metrics?.documents ?? 0} indexed documents`}
-          tone="primary"
-        />
-        <MetricTile
-          label="Recorded results"
-          value={metrics?.results ?? 0}
-          detail={`${summary?.pendingResults ?? 0} awaiting validation`}
-          tone={summary?.pendingResults ? 'warning' : 'success'}
-        />
-        <MetricTile
-          label="Outstanding"
-          value={`€${(metrics?.outstandingAmount ?? 0).toLocaleString('en-GB', {
-            minimumFractionDigits: 2,
-          })}`}
-          detail={`${metrics?.openInvoices ?? 0} open invoices`}
-          tone={metrics?.openInvoices ? 'primary' : 'neutral'}
-        />
-        <MetricTile
-          label="Lab readiness"
-          value={summary?.maintenanceDue ? 'Attention' : 'Ready'}
-          detail={`${metrics?.assets ?? 0} assets · ${metrics?.lowStock ?? 0} low stock`}
-          tone={
-            summary?.maintenanceDue || metrics?.lowStock ? 'warning' : 'success'
-          }
-        />
-      </MetricRail>
-
       {summary?.source === 'unavailable' ? (
         <EmptyState
           error
@@ -193,7 +174,7 @@ export function OverviewDashboard() {
           }
         />
       ) : (
-        <div className="grid gap-5 xl:grid-cols-[0.9fr_1.6fr]">
+        <div className="grid gap-3 xl:grid-cols-[0.9fr_1.6fr]">
           <SectionPanel
             title="Work queue"
             description="Items that need the laboratory team’s attention."
@@ -204,7 +185,7 @@ export function OverviewDashboard() {
                 <li key={item.label}>
                   <Link
                     href={item.href}
-                    className="group flex items-center gap-3 px-4 py-3 hover:bg-muted/50"
+                    className="group flex items-center gap-2 px-panel py-2 hover:bg-muted/50"
                   >
                     <span
                       className={`h-8 w-0.5 shrink-0 rounded-full ${

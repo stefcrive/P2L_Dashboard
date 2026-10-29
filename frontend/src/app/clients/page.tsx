@@ -1,10 +1,11 @@
 import { ClientManagerDashboard } from '@/components/client-manager-dashboard';
 
-export default function ClientsPage({
-  searchParams,
+export default async function ClientsPage({
+  searchParams: searchParamsPromise,
 }: {
-  searchParams?: { clientId?: string };
+  searchParams?: Promise<{ clientId?: string }>;
 }) {
+  const searchParams = await searchParamsPromise;
   return (
     <ClientManagerDashboard initialClientId={searchParams?.clientId ?? null} />
   );

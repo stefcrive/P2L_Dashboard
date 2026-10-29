@@ -120,7 +120,7 @@ function defaultMinimumStock(
   materialType: MaterialType,
   suggestedStock: number | null
 ): number | null {
-  if (materialType !== 'consumable') {
+  if (materialType !== 'consumable' && materialType !== 'spare_part') {
     return null;
   }
   if (suggestedStock === null) {
@@ -196,10 +196,11 @@ export async function POST() {
     const upsertRows: MaterialUpsertRow[] = extracted.materials.map((material) => {
       const existing = existingByNormalizedKey.get(material.normalizedKey);
       const currentStock = existing?.current_stock ?? material.suggestedStock;
-      const minimumStock =
-        existing?.minimum_stock ??
-        defaultMinimumStock(material.materialType, material.suggestedStock);
       const locked = existing?.catalog_locked ?? false;
+      const minimumStock = locked
+        ? existing?.minimum_stock ??
+          defaultMinimumStock(material.materialType, material.suggestedStock)
+        : defaultMinimumStock(material.materialType, material.suggestedStock);
 
       return {
         normalized_key: material.normalizedKey,

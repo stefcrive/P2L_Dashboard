@@ -1,6 +1,13 @@
 'use client';
 
-import { useMemo, useState, type DragEvent, type ReactNode } from 'react';
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useState,
+  type DragEvent,
+  type ReactNode,
+} from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Download,
@@ -23,6 +30,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { ProvidersDirectory } from '@/components/operations/providers-dashboard';
 import {
   Table,
   TableBody,
@@ -76,6 +84,13 @@ interface PurchaseListFormState {
   status: string;
 }
 
+interface MaterialDestinationGroup {
+  key: string;
+  label: string;
+  sortOrder: number;
+  materials: MaterialInventoryRow[];
+}
+
 const purchaseListStatuses = ['draft', 'ordered', 'received', 'cancelled'];
 
 const materialTypeLabel: Record<MaterialType, string> = {
@@ -83,6 +98,20 @@ const materialTypeLabel: Record<MaterialType, string> = {
   consumable: 'Consumable',
   spare_part: 'Spare part',
   other: 'Other',
+};
+
+const materialTypeSortOrder: Record<MaterialType, number> = {
+  consumable: 0,
+  spare_part: 1,
+  equipment: 2,
+  other: 3,
+};
+
+const materialTypePluralLabel: Record<MaterialType, string> = {
+  equipment: 'equipment',
+  consumable: 'consumables',
+  spare_part: 'spare parts',
+  other: 'other',
 };
 
 const availabilityLabel: Record<
@@ -104,6 +133,118 @@ function formatDateTime(value: string): string {
 function formatNumber(value: number | null | undefined): string {
   if (value === null || value === undefined) return '—';
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function normalizeDestination(value: string | null): string {
+  return (value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function destinationGroupFor(material: MaterialInventoryRow): Omit<
+  MaterialDestinationGroup,
+  'materials'
+> {
+  const destination = material.equipment?.trim() || 'General laboratory';
+  const normalized = normalizeDestination(destination);
+  const isGeneral =
+    !normalized ||
+    normalized === 'general lab' ||
+    normalized === 'general laboratory' ||
+    normalized === 'laboratory';
+  const isKiel = normalized.includes('kiel') || normalized.includes('carbodevice');
+  const isDeltaV = /delta\s*[- ]?v\b/.test(normalized);
+  const isMat253 =
+    normalized.includes('mat253') ||
+    normalized.includes('mat 253') ||
+    normalized.includes('253 plus');
+
+  if (isGeneral) {
+    return { key: 'general-laboratory', label: 'General laboratory', sortOrder: 0 };
+  }
+
+  const systems = [
+    isKiel ? 'Kiel IV' : null,
+    isDeltaV ? 'Delta V' : null,
+    isMat253 ? 'MAT 253' : null,
+  ].filter((system): system is string => Boolean(system));
+
+  if (systems.length > 1) {
+    return {
+      key: `shared-${systems.join('-').toLowerCase().replace(/\s+/g, '-')}`,
+      label: `${systems.join(' + ')} systems`,
+      sortOrder: 40,
+    };
+  }
+  if (isKiel) {
+    return { key: 'kiel-iv', label: 'Kiel IV system', sortOrder: 10 };
+  }
+  if (isDeltaV) {
+    return { key: 'delta-v', label: 'Delta V system', sortOrder: 20 };
+  }
+  if (isMat253) {
+    return { key: 'mat-253', label: 'MAT 253 system', sortOrder: 30 };
+  }
+
+  return {
+    key: `equipment-${normalized.replace(/[^a-z0-9]+/g, '-')}`,
+    label: destination,
+    sortOrder: 50,
+  };
+}
+
+function groupMaterialsByDestination(
+  materials: MaterialInventoryRow[]
+): MaterialDestinationGroup[] {
+  const grouped = new Map<string, MaterialDestinationGroup>();
+
+  for (const material of materials) {
+    const group = destinationGroupFor(material);
+    const existing = grouped.get(group.key);
+    if (existing) {
+      existing.materials.push(material);
+    } else {
+      grouped.set(group.key, { ...group, materials: [material] });
+    }
+  }
+
+  return Array.from(grouped.values())
+    .map((group) => ({
+      ...group,
+      materials: group.materials.sort((first, second) => {
+        const typeDifference =
+          materialTypeSortOrder[first.material_type] -
+          materialTypeSortOrder[second.material_type];
+        return typeDifference || first.name.localeCompare(second.name);
+      }),
+    }))
+    .sort(
+      (first, second) =>
+        first.sortOrder - second.sortOrder || first.label.localeCompare(second.label)
+    );
+}
+
+function materialTypeSummary(materials: MaterialInventoryRow[]): string {
+  const counts = materials.reduce<Partial<Record<MaterialType, number>>>(
+    (summary, material) => {
+      summary[material.material_type] =
+        (summary[material.material_type] ?? 0) + 1;
+      return summary;
+    },
+    {}
+  );
+
+  return MATERIAL_TYPES.filter((type) => counts[type])
+    .sort((first, second) => materialTypeSortOrder[first] - materialTypeSortOrder[second])
+    .map((type) => {
+      const count = counts[type] ?? 0;
+      const label =
+        count === 1 ? materialTypeLabel[type].toLowerCase() : materialTypePluralLabel[type];
+      return `${count} ${label}`;
+    })
+    .join(' · ');
 }
 
 function inferredMinimumStock(material: MaterialInventoryRow): number {
@@ -329,6 +470,10 @@ export function MaterialsDashboard() {
   });
   const data = materialsQuery.data;
   const materials = useMemo(() => data?.materials ?? [], [data?.materials]);
+  const materialGroups = useMemo(
+    () => groupMaterialsByDestination(materials),
+    [materials]
+  );
   const equipmentNames = useMemo(
     () => (data?.equipmentOptions ?? []).map((equipment) => equipment.name),
     [data?.equipmentOptions]
@@ -476,11 +621,10 @@ export function MaterialsDashboard() {
   }
 
   return (
-    <div className="min-w-0 space-y-5">
+    <div className="min-w-0 space-y-3">
       <PageHeader
         eyebrow="Laboratory supply"
         title="Inventory"
-        description="Review the maintenance archive, control stock, and prepare traceable purchase requests."
         actions={
           <StatusPill
             tone={
@@ -519,14 +663,15 @@ export function MaterialsDashboard() {
         </Card>
       ) : null}
 
-      <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
+      <section className="grid min-w-0 items-start gap-workspace lg:grid-cols-[minmax(0,1fr)_320px] 2xl:grid-cols-[minmax(0,1fr)_360px]">
         <Card className="min-w-0 overflow-hidden">
           <CardHeader className="space-y-3">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <CardTitle>Cataloged materials</CardTitle>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Search the catalog, drag a row into the purchase request, or click it to edit.
+                  Materials are grouped by destination and sorted by category. Drag a row
+                  into the purchase request, or click it to edit.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -542,7 +687,7 @@ export function MaterialsDashboard() {
 
             <div className="grid gap-3 md:grid-cols-4">
               <div className="relative md:col-span-2">
-                <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={filters.search}
                   onChange={(event) =>
@@ -563,7 +708,7 @@ export function MaterialsDashboard() {
                     type: event.target.value as FiltersState['type'],
                   }))
                 }
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                className="h-control rounded-md border border-input bg-background px-3 text-sm"
               >
                 <option value="all">All categories</option>
                 {(data?.availableTypes ?? []).map((type) => (
@@ -580,7 +725,7 @@ export function MaterialsDashboard() {
                     equipment: event.target.value,
                   }))
                 }
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                className="h-control rounded-md border border-input bg-background px-3 text-sm"
               >
                 <option value="all">All destinations</option>
                 {(data?.availableEquipment ?? []).map((equipment) => (
@@ -604,15 +749,16 @@ export function MaterialsDashboard() {
               Only show low-stock consumables
             </label>
           </CardHeader>
-          <CardContent className="max-h-[720px] overflow-auto p-0">
-            <Table className="min-w-[790px] table-fixed">
+          <CardContent className="p-0">
+            <Table className="min-w-[910px] table-fixed" containerClassName="max-h-[calc(100dvh-300px)]">
               <colgroup>
                 <col className="w-[32px]" />
-                <col className="w-[32%]" />
+                <col className="w-[29%]" />
                 <col className="w-[110px]" />
                 <col className="w-[150px]" />
                 <col className="w-[130px]" />
-                <col className="w-[210px]" />
+                <col className="w-[120px]" />
+                <col className="w-[230px]" />
                 <col className="w-[48px]" />
               </colgroup>
               <TableHeader className="sticky top-0 z-10">
@@ -622,6 +768,7 @@ export function MaterialsDashboard() {
                   <TableHead>Category</TableHead>
                   <TableHead>Destination</TableHead>
                   <TableHead>Part number</TableHead>
+                  <TableHead>Available units</TableHead>
                   <TableHead>Stock availability</TableHead>
                   <TableHead aria-label="Add" />
                 </TableRow>
@@ -629,22 +776,42 @@ export function MaterialsDashboard() {
               <TableBody>
                 {materialsQuery.isLoading ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                    <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
                       Loading materials…
                     </TableCell>
                   </TableRow>
                 ) : null}
                 {!materialsQuery.isLoading && !materials.length ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                    <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
                       No materials match these filters.
                     </TableCell>
                   </TableRow>
                 ) : null}
-                {materials.map((material) => {
-                  const progress = stockProgress(material);
-                  const minimum = inferredMinimumStock(material);
-                  return (
+                {materialGroups.map((group) => (
+                  <Fragment key={group.key}>
+                    <TableRow className="border-y bg-slate-100/90 hover:bg-slate-100/90 dark:bg-slate-900/90 dark:hover:bg-slate-900/90">
+                      <TableCell colSpan={8} className="px-3 py-2.5">
+                        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                          <div className="flex items-baseline gap-2">
+                            <h3 className="font-display text-sm font-semibold text-foreground">
+                              {group.label}
+                            </h3>
+                            <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+                              {group.materials.length}{' '}
+                              {group.materials.length === 1 ? 'item' : 'items'}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">
+                            {materialTypeSummary(group.materials)}
+                          </p>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                    {group.materials.map((material) => {
+                      const progress = stockProgress(material);
+                      const minimum = inferredMinimumStock(material);
+                      return (
                     <TableRow
                       key={material.id}
                       draggable
@@ -662,50 +829,59 @@ export function MaterialsDashboard() {
                       }}
                       className="cursor-pointer"
                     >
-                      <TableCell className="px-2 text-muted-foreground">
+                      <TableCell className="px-2 py-1.5 text-muted-foreground">
                         <GripVertical className="h-4 w-4" />
                       </TableCell>
-                      <TableCell className="whitespace-normal">
-                        <p className="line-clamp-2 font-medium leading-5">{material.name}</p>
-                        <p className="truncate text-[11px] text-muted-foreground">
-                          {material.source_file}
+                      <TableCell className="overflow-hidden py-1.5">
+                        <p
+                          className="truncate font-medium"
+                          title={`${material.name} · ${material.source_file}`}
+                        >
+                          {material.name}
                         </p>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="py-1.5">
                         <Badge variant="secondary">
                           {materialTypeLabel[material.material_type]}
                         </Badge>
                       </TableCell>
-                      <TableCell className="truncate">
-                        {material.equipment ?? 'General lab'}
-                      </TableCell>
-                      <TableCell className="truncate font-mono text-[11px]">
-                        {material.part_number ?? '—'}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="font-mono text-[11px] tabular-nums">
-                            {formatNumber(material.current_stock)}
-                            {material.unit ? ` ${material.unit}` : ''}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground">
-                            min {formatNumber(minimum)}
-                          </span>
-                        </div>
-                        <div
-                          className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800"
-                          title={`${progress.percentage}% of the working stock target`}
-                        >
-                          <div
-                            className={cn('h-full rounded-full', progress.tone)}
-                            style={{ width: `${progress.percentage}%` }}
-                          />
-                        </div>
-                        <p className="mt-1 text-[10px] text-muted-foreground">
-                          {availabilityLabel[material.availability_status]}
+                      <TableCell className="overflow-hidden py-1.5">
+                        <p className="truncate" title={material.equipment ?? 'General lab'}>
+                          {material.equipment ?? 'General lab'}
                         </p>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="overflow-hidden py-1.5 font-mono text-[11px]">
+                        <p className="truncate" title={material.part_number ?? undefined}>
+                          {material.part_number ?? '—'}
+                        </p>
+                      </TableCell>
+                      <TableCell className="py-1.5 font-mono text-[11px] font-medium tabular-nums">
+                        {formatNumber(material.current_stock)}
+                        {material.unit ? ` ${material.unit}` : ''}
+                      </TableCell>
+                      <TableCell className="py-1.5">
+                        <div className="grid min-w-0 grid-cols-[3.5rem_6rem_minmax(0,1fr)] items-center gap-2">
+                          <span className="text-right font-mono text-[11px] tabular-nums text-muted-foreground">
+                            min {formatNumber(minimum)}
+                          </span>
+                          <div
+                            className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800"
+                            title={`${progress.percentage}% of the working stock target`}
+                          >
+                            <div
+                              className={cn('h-full rounded-full', progress.tone)}
+                              style={{ width: `${progress.percentage}%` }}
+                            />
+                          </div>
+                          <span
+                            className="min-w-0 truncate text-[11px] text-muted-foreground"
+                            title={availabilityLabel[material.availability_status]}
+                          >
+                            {availabilityLabel[material.availability_status]}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-1">
                         <Button
                           size="icon"
                           variant="ghost"
@@ -719,8 +895,10 @@ export function MaterialsDashboard() {
                         </Button>
                       </TableCell>
                     </TableRow>
-                  );
-                })}
+                      );
+                    })}
+                  </Fragment>
+                ))}
               </TableBody>
             </Table>
           </CardContent>
@@ -756,7 +934,7 @@ export function MaterialsDashboard() {
             <select
               value={providerName}
               onChange={(event) => setProviderName(event.target.value)}
-              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+              className="h-control w-full rounded-md border border-input bg-background px-3 text-sm"
             >
               <option value="">Provider not assigned</option>
               {(data?.providers ?? []).map((provider) => (
@@ -960,6 +1138,8 @@ export function MaterialsDashboard() {
         </CardContent>
       </Card>
 
+      <ProvidersDirectory />
+
       {selectedPurchaseList && purchaseListForm ? (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-[2px]"
@@ -973,10 +1153,10 @@ export function MaterialsDashboard() {
             }
           }}
         >
-          <div className="w-full max-w-lg overflow-hidden rounded-xl border bg-background shadow-2xl">
+          <div className="w-full max-w-lg overflow-hidden rounded-lg border bg-background shadow-2xl">
             <div className="flex items-start justify-between border-b px-5 py-4">
               <div>
-                <p className="font-mono text-[10px] uppercase tracking-wide text-primary">
+                <p className="font-mono text-[11px] uppercase tracking-wide text-primary">
                   Purchase history
                 </p>
                 <h2 id="purchase-request-title" className="font-display text-lg font-semibold">
@@ -1021,7 +1201,7 @@ export function MaterialsDashboard() {
                       providerName: event.target.value,
                     })
                   }
-                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  className="h-control w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
                   <option value="">Provider not assigned</option>
                   {(data?.providers ?? []).map((provider) => (
@@ -1040,7 +1220,7 @@ export function MaterialsDashboard() {
                       status: event.target.value,
                     })
                   }
-                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  className="h-control w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
                   {Array.from(
                     new Set([...purchaseListStatuses, purchaseListForm.status])
@@ -1094,10 +1274,10 @@ export function MaterialsDashboard() {
             }
           }}
         >
-          <div className="max-h-[92vh] w-full max-w-3xl overflow-auto rounded-xl border bg-background shadow-2xl">
+          <div className="max-h-[92vh] w-full max-w-3xl overflow-auto rounded-lg border bg-background shadow-2xl">
             <div className="sticky top-0 z-10 flex items-start justify-between border-b bg-background px-5 py-4">
               <div>
-                <p className="font-mono text-[10px] uppercase tracking-wide text-primary">
+                <p className="font-mono text-[11px] uppercase tracking-wide text-primary">
                   {selectedMaterial ? 'Material record' : 'New catalog item'}
                 </p>
                 <h2 id="material-record-title" className="font-display text-lg font-semibold">
@@ -1120,7 +1300,7 @@ export function MaterialsDashboard() {
                 <X className="h-4 w-4" />
               </Button>
             </div>
-            <div className="grid gap-4 p-5 sm:grid-cols-2">
+            <div className="grid gap-workspace p-3 sm:grid-cols-2">
               <FormField label="Material name" className="sm:col-span-2">
                 <Input
                   value={materialForm.name}
@@ -1138,7 +1318,7 @@ export function MaterialsDashboard() {
                       materialType: event.target.value as MaterialType,
                     })
                   }
-                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  className="h-control w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
                   {MATERIAL_TYPES.map((type) => (
                     <option key={type} value={type}>
@@ -1153,7 +1333,7 @@ export function MaterialsDashboard() {
                   onChange={(event) =>
                     setMaterialForm({ ...materialForm, equipment: event.target.value })
                   }
-                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  className="h-control w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
                   <option value="">General lab</option>
                   {materialForm.equipment &&
@@ -1169,7 +1349,7 @@ export function MaterialsDashboard() {
                   ))}
                 </select>
                 {!data?.equipmentOptions?.length ? (
-                  <span className="block text-[10px] normal-case tracking-normal text-amber-700 dark:text-amber-300">
+                  <span className="block text-[11px] normal-case tracking-normal text-amber-700 dark:text-amber-300">
                     Add equipment in Settings to populate this list.
                   </span>
                 ) : null}
@@ -1192,7 +1372,7 @@ export function MaterialsDashboard() {
                         .value as MaterialFormState['availabilityStatus'],
                     })
                   }
-                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  className="h-control w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
                   {Object.entries(availabilityLabel).map(([value, label]) => (
                     <option key={value} value={value}>
@@ -1264,7 +1444,7 @@ export function MaterialsDashboard() {
                   onChange={(event) =>
                     setMaterialForm({ ...materialForm, providerId: event.target.value })
                   }
-                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  className="h-control w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
                   <option value="">Not assigned</option>
                   {(data?.providers ?? []).map((provider) => (
@@ -1354,19 +1534,29 @@ function StockAvailabilityControl({
   form: MaterialFormState;
   onChange: (currentStock: string) => void;
 }) {
+  const [draftCurrentStock, setDraftCurrentStock] = useState(form.currentStock);
+
+  useEffect(() => {
+    setDraftCurrentStock(form.currentStock);
+  }, [form.currentStock]);
+
   const minimum = Math.max(0, Number(form.minimumStock) || 0);
   const requestedTarget = Math.max(0, Number(form.suggestedStock) || 0);
   const target = Math.max(requestedTarget, minimum + 1);
-  const rawCurrent = Math.max(0, Number(form.currentStock) || 0);
+  const rawCurrent = Math.max(0, Number(draftCurrentStock) || 0);
   const sliderCurrent = Math.min(target, Math.max(minimum, rawCurrent));
   const range = target - minimum;
   const percentage = range > 0 ? ((sliderCurrent - minimum) / range) * 100 : 0;
   const isBelowMinimum = rawCurrent < minimum;
   const isAtTarget = rawCurrent >= target;
+  const commitCurrentStock = (value: string) => {
+    setDraftCurrentStock(value);
+    onChange(value);
+  };
 
   return (
     <fieldset className="sm:col-span-2 rounded-lg border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-950/45">
-      <legend className="px-1 font-mono text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+      <legend className="px-1 font-mono text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         Stock availability
       </legend>
       <div className="flex items-end justify-between gap-4">
@@ -1404,7 +1594,7 @@ function StockAvailabilityControl({
         >
           <div
             className={cn(
-              'h-full rounded-full transition-[width]',
+              'h-full rounded-full',
               isBelowMinimum
                 ? 'bg-rose-500'
                 : isAtTarget
@@ -1420,13 +1610,17 @@ function StockAvailabilityControl({
           max={target}
           step="1"
           value={sliderCurrent}
-          onChange={(event) => onChange(event.target.value)}
+          onChange={(event) => setDraftCurrentStock(event.target.value)}
+          onPointerUp={(event) => commitCurrentStock(event.currentTarget.value)}
+          onKeyUp={(event) => commitCurrentStock(event.currentTarget.value)}
+          onBlur={(event) => commitCurrentStock(event.currentTarget.value)}
           className="relative h-7 w-full cursor-ew-resize appearance-none bg-transparent accent-blue-600"
           aria-label="Current stock"
+          aria-valuenow={sliderCurrent}
           aria-valuetext={`${sliderCurrent} ${form.unit || 'units'}`}
         />
       </div>
-      <div className="flex items-center justify-between font-mono text-[10px] text-muted-foreground">
+      <div className="flex items-center justify-between font-mono text-[11px] text-muted-foreground">
         <span>
           Minimum <strong className="text-foreground">{formatNumber(minimum)}</strong>
         </span>
@@ -1440,8 +1634,15 @@ function StockAvailabilityControl({
           type="number"
           min="0"
           step="1"
-          value={form.currentStock}
-          onChange={(event) => onChange(event.target.value)}
+          value={draftCurrentStock}
+          onChange={(event) => setDraftCurrentStock(event.target.value)}
+          onBlur={(event) => commitCurrentStock(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              commitCurrentStock(event.currentTarget.value);
+              event.currentTarget.blur();
+            }
+          }}
           className="ml-auto w-28"
         />
       </label>
@@ -1460,7 +1661,7 @@ function FormField({
 }) {
   return (
     <label className={cn('space-y-1.5', className)}>
-      <span className="font-mono text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+      <span className="font-mono text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </span>
       {children}

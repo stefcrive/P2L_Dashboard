@@ -3,15 +3,17 @@ import { access, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } f
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const CLEANUP_VERSION = 'isogeochem_cleanup_v1';
+export const CLEANUP_VERSION = 'isogeochem_cleanup_v2';
 export const RECORD_SEPARATOR = '='.repeat(50);
 
 const MESSAGE_HEADER =
   /^Subject:([^\r\n]*)\r?\nAuthor:([^\r\n]*)\r?\nDate:([^\r\n]*)\r?\n={50}\r?$/gm;
 const TRAILING_SEPARATOR = /\r?\n={50}\s*$/;
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+// Keep phone candidates on one physical line. `\s` also matches newlines and
+// caused vertical runs of figure/table values to be removed as one phone number.
 const PHONE_PATTERN =
-  /(?<!\d)(?:\+?\d[\s().-]*)?(?:\d[\s().-]*){7,14}\d(?!\d)/g;
+  /(?<!\d)(?:\+?\d[ \t().-]*)?(?:\d[ \t().-]*){7,14}\d(?!\d)/g;
 
 const JOB_SUBJECT_PATTERN =
   /\b(?:job(?:s| posting| announcement| offer| adverts?)?|vacanc(?:y|ies)|position(?:s)? available|position opening|postdoc(?:toral)?|post-doc|studentship|ph\.?d\.? (?:position|project|opportunity)|doctoral (?:position|opportunity)|research fellow|employment opportunity|career opportunity|faculty|lecturer position|assistant prof(?:essor)?|associate prof(?:essor)?|tenure[- ]track|open rank|endowed chair|research scientist position|research associate position|research assistant professor|scientific officer|technician position|graduate student opportunit(?:y|ies)|r\.?a\.? position)\b/i;
@@ -371,8 +373,8 @@ export function serializeRecord(message, cleanedBody) {
 
 function parseArguments(argv) {
   const options = {
-    input: 'Raw ISOGEOCHEM data',
-    output: 'Merged_text_files',
+    input: 'Raw ISOGEOCHEM data backup',
+    output: 'Raw ISOGEOCHEM data',
     audit: 'cleanup_audit',
     dryRun: false,
   };

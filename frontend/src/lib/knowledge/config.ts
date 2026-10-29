@@ -8,8 +8,8 @@ function findRepositoryRoot() {
   return (
     candidates.find(
       (candidate) =>
-        fs.existsSync(path.join(candidate, 'Merged_text_files')) &&
-        fs.existsSync(path.join(candidate, 'frontend')),
+        fs.existsSync(path.join(candidate, 'Raw ISOGEOCHEM data')) &&
+        fs.existsSync(path.join(candidate, 'frontend'))
     ) ?? process.cwd()
   );
 }
@@ -21,7 +21,9 @@ function resolveFromRepository(repositoryRoot: string, value: string) {
 function readEnvironmentFile(filePath: string, name: string) {
   if (!fs.existsSync(filePath)) return undefined;
   const contents = fs.readFileSync(filePath, 'utf8');
-  const match = contents.match(new RegExp(`^\\uFEFF?${name}\\s*=\\s*(.*)$`, 'm'));
+  const match = contents.match(
+    new RegExp(`^\\uFEFF?${name}\\s*=\\s*(.*)$`, 'm')
+  );
   if (!match) return undefined;
   let value = match[1].trim();
   if (
@@ -56,22 +58,25 @@ let cachedConfig: KnowledgeConfig | null = null;
 export function getKnowledgeConfig(): KnowledgeConfig {
   if (cachedConfig) return cachedConfig;
 
-  const repositoryRoot = findRepositoryRoot();
+  const repositoryRoot = process.env.APP_DATABASE_MODE === 'neon' ? '/tmp/p2l-knowledge' : findRepositoryRoot();
   const databasePath = resolveFromRepository(
     repositoryRoot,
-    getWorkspaceEnvironmentValue('KNOWLEDGE_DB_PATH') ?? '.local-data/knowledge-postgres',
+    getWorkspaceEnvironmentValue('KNOWLEDGE_DB_PATH') ?? (process.env.VERCEL ? '/tmp/p2l-knowledge' : '.local-data/knowledge-postgres'),
   );
   const defaultSourcePath = resolveFromRepository(
     repositoryRoot,
-    getWorkspaceEnvironmentValue('KNOWLEDGE_SOURCE_PATH') ?? 'Merged_text_files',
+    getWorkspaceEnvironmentValue('KNOWLEDGE_SOURCE_PATH') ??
+      'Raw ISOGEOCHEM data'
   );
   const embeddingDimensions = Number.parseInt(
     getWorkspaceEnvironmentValue('KNOWLEDGE_EMBEDDING_DIMENSIONS') ?? '1024',
-    10,
+    10
   );
 
   if (!Number.isInteger(embeddingDimensions) || embeddingDimensions < 256) {
-    throw new Error('KNOWLEDGE_EMBEDDING_DIMENSIONS must be an integer of at least 256.');
+    throw new Error(
+      'KNOWLEDGE_EMBEDDING_DIMENSIONS must be an integer of at least 256.'
+    );
   }
 
   fs.mkdirSync(databasePath, { recursive: true });
@@ -85,7 +90,8 @@ export function getKnowledgeConfig(): KnowledgeConfig {
       'text-embedding-3-small',
     embeddingDimensions,
     enrichmentModel:
-      getWorkspaceEnvironmentValue('KNOWLEDGE_ENRICHMENT_MODEL') ?? 'gpt-5.6-luna',
+      getWorkspaceEnvironmentValue('KNOWLEDGE_ENRICHMENT_MODEL') ??
+      'gpt-5.6-luna',
     answerModel:
       getWorkspaceEnvironmentValue('KNOWLEDGE_ANSWER_MODEL') ?? 'gpt-5.6-terra',
   };

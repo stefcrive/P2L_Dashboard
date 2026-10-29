@@ -1,4 +1,4 @@
-export const LOCAL_APP_SCHEMA_VERSION = 8;
+export const LOCAL_APP_SCHEMA_VERSION = 14;
 
 export const LOCAL_APP_SCHEMA_SQL = `
 CREATE SCHEMA IF NOT EXISTS app_local;
@@ -404,6 +404,15 @@ CREATE TABLE IF NOT EXISTS public.equipment_assets (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE public.equipment_assets
+  ADD COLUMN IF NOT EXISTS maintenance_interval_months integer;
+
+ALTER TABLE public.equipment_assets
+  DROP CONSTRAINT IF EXISTS equipment_assets_maintenance_interval_check;
+ALTER TABLE public.equipment_assets
+  ADD CONSTRAINT equipment_assets_maintenance_interval_check
+  CHECK (maintenance_interval_months IS NULL OR maintenance_interval_months > 0);
+
 CREATE TABLE IF NOT EXISTS public.lab_book_entries (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   entry_type text NOT NULL DEFAULT 'general'
@@ -440,7 +449,7 @@ ALTER TABLE public.lab_book_entries
   CHECK (entry_type IN (
     'publication', 'masters_delivery', 'phd_delivery', 'results_delivery',
     'maintenance', 'calibration', 'incident', 'quality_control', 'software',
-    'infrastructure', 'general'
+    'infrastructure', 'sample_analysis', 'general'
   ));
 
 ALTER TABLE public.lab_book_entries
@@ -454,6 +463,75 @@ ALTER TABLE public.lab_book_entries
 ALTER TABLE public.lab_book_entries
   ADD CONSTRAINT lab_book_entries_quantity_check
   CHECK (quantity IS NULL OR quantity >= 0);
+
+CREATE TABLE IF NOT EXISTS public.equipment_components (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_id uuid NOT NULL REFERENCES public.equipment_assets(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  sort_order integer NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
+  maintenance_interval_months integer
+    CHECK (maintenance_interval_months IS NULL OR maintenance_interval_months > 0),
+  last_maintenance_at timestamptz,
+  next_maintenance_at timestamptz,
+  notes text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (asset_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS public.sample_queue_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  queue_code text NOT NULL UNIQUE,
+  queue_position integer NOT NULL DEFAULT 0 CHECK (queue_position >= 0),
+  client_id uuid REFERENCES public.clients(id) ON DELETE SET NULL,
+  sample_label text NOT NULL,
+  sample_count integer NOT NULL DEFAULT 1 CHECK (sample_count > 0),
+  samples_per_week numeric(10, 2) NOT NULL DEFAULT 100
+    CHECK (samples_per_week > 0),
+  analysis_type text NOT NULL,
+  matrix text,
+  priority text NOT NULL DEFAULT 'routine'
+    CHECK (priority IN ('routine', 'priority', 'urgent')),
+  status text NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'analysing', 'completed')),
+  checked_in_at timestamptz NOT NULL DEFAULT now(),
+  estimated_start_at timestamptz NOT NULL,
+  estimated_end_at timestamptz NOT NULL,
+  actual_started_at timestamptz,
+  completed_at timestamptz,
+  asset_id uuid REFERENCES public.equipment_assets(id) ON DELETE SET NULL,
+  operator text,
+  attachments jsonb NOT NULL DEFAULT '[]'::jsonb,
+  notes text,
+  lab_book_entry_id uuid UNIQUE
+    REFERENCES public.lab_book_entries(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (estimated_end_at >= estimated_start_at),
+  CHECK (completed_at IS NULL OR actual_started_at IS NULL OR completed_at >= actual_started_at)
+);
+
+CREATE TABLE IF NOT EXISTS public.sample_queue_segments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  queue_item_id uuid NOT NULL
+    REFERENCES public.sample_queue_items(id) ON DELETE CASCADE,
+  segment_order integer NOT NULL DEFAULT 1 CHECK (segment_order > 0),
+  run_position integer NOT NULL DEFAULT 0 CHECK (run_position >= 0),
+  start_at timestamptz NOT NULL,
+  end_at timestamptz NOT NULL,
+  user_edited boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (queue_item_id, segment_order),
+  CHECK (end_at >= start_at)
+);
+
+ALTER TABLE public.sample_queue_segments
+  ADD COLUMN IF NOT EXISTS run_position integer NOT NULL DEFAULT 0
+  CHECK (run_position >= 0);
+
+ALTER TABLE public.sample_queue_segments
+  ADD COLUMN IF NOT EXISTS user_edited boolean NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS public.backup_records (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -518,6 +596,11 @@ CREATE INDEX IF NOT EXISTS invoice_items_invoice_idx ON public.invoice_items (in
 CREATE INDEX IF NOT EXISTS equipment_assets_provider_idx ON public.equipment_assets (provider_id);
 CREATE INDEX IF NOT EXISTS equipment_assets_service_idx
   ON public.equipment_assets (status, next_service_at);
+CREATE INDEX IF NOT EXISTS equipment_components_asset_order_idx
+  ON public.equipment_components (asset_id, sort_order, name);
+CREATE INDEX IF NOT EXISTS equipment_components_next_maintenance_idx
+  ON public.equipment_components (next_maintenance_at)
+  WHERE next_maintenance_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS lab_book_asset_idx ON public.lab_book_entries (asset_id);
 CREATE INDEX IF NOT EXISTS lab_book_provider_idx ON public.lab_book_entries (provider_id);
 CREATE INDEX IF NOT EXISTS lab_book_occurred_idx
@@ -526,8 +609,168 @@ CREATE UNIQUE INDEX IF NOT EXISTS lab_book_source_key_unique_idx
   ON public.lab_book_entries (source_key) WHERE source_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS lab_book_subject_idx
   ON public.lab_book_entries (subject, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS sample_queue_position_idx
+  ON public.sample_queue_items (status, queue_position);
+CREATE INDEX IF NOT EXISTS sample_queue_window_idx
+  ON public.sample_queue_items (estimated_start_at, estimated_end_at);
+CREATE INDEX IF NOT EXISTS sample_queue_client_idx
+  ON public.sample_queue_items (client_id, checked_in_at DESC);
+CREATE INDEX IF NOT EXISTS sample_queue_segments_item_idx
+  ON public.sample_queue_segments (queue_item_id, segment_order);
+CREATE INDEX IF NOT EXISTS sample_queue_segments_window_idx
+  ON public.sample_queue_segments (start_at, end_at);
+CREATE INDEX IF NOT EXISTS sample_queue_segments_run_position_idx
+  ON public.sample_queue_segments (run_position);
 CREATE INDEX IF NOT EXISTS backup_records_started_idx
   ON public.backup_records (status, started_at DESC);
+
+CREATE OR REPLACE FUNCTION public.sync_equipment_maintenance_alert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  alert_key text;
+  alert_title text;
+  alert_subject text;
+  alert_description text;
+  alert_asset_id uuid;
+  alert_provider_id uuid;
+  alert_due_at timestamptz;
+  alert_interval integer;
+  asset_name text;
+BEGIN
+  IF TG_TABLE_NAME = 'equipment_assets' THEN
+    alert_key := 'maintenance:asset:' || NEW.id::text || ':pending';
+    alert_title := 'Scheduled maintenance · ' || NEW.name;
+    alert_subject := NEW.name;
+    alert_description := 'Recurring equipment maintenance alert. Completing this record schedules the next occurrence automatically.';
+    alert_asset_id := NEW.id;
+    alert_provider_id := NEW.provider_id;
+    alert_due_at := NEW.next_service_at;
+    alert_interval := NEW.maintenance_interval_months;
+  ELSE
+    SELECT asset.name, asset.provider_id
+      INTO asset_name, alert_provider_id
+    FROM public.equipment_assets AS asset
+    WHERE asset.id = NEW.asset_id;
+
+    alert_key := 'maintenance:component:' || NEW.id::text || ':pending';
+    alert_title := 'Scheduled maintenance · ' || asset_name || ' · ' || NEW.name;
+    alert_subject := NEW.name;
+    alert_description := COALESCE(
+      NULLIF(NEW.notes, ''),
+      'Recurring component maintenance alert. Completing this record schedules the next occurrence automatically.'
+    );
+    alert_asset_id := NEW.asset_id;
+    alert_due_at := NEW.next_maintenance_at;
+    alert_interval := NEW.maintenance_interval_months;
+  END IF;
+
+  IF alert_due_at IS NULL OR alert_interval IS NULL THEN
+    UPDATE public.lab_book_entries
+    SET status = 'cancelled'
+    WHERE source_key = alert_key
+      AND status <> 'completed';
+    RETURN NEW;
+  END IF;
+
+  INSERT INTO public.lab_book_entries (
+    source_key, entry_type, title, occurred_at, date_precision, asset_id,
+    provider_id, status, description, subject, next_due_at
+  )
+  VALUES (
+    alert_key, 'maintenance', alert_title, alert_due_at, 'estimated',
+    alert_asset_id, alert_provider_id, 'scheduled', alert_description,
+    alert_subject, alert_due_at
+  )
+  ON CONFLICT (source_key) WHERE source_key IS NOT NULL
+  DO UPDATE SET
+    title = EXCLUDED.title,
+    occurred_at = EXCLUDED.occurred_at,
+    date_precision = EXCLUDED.date_precision,
+    asset_id = EXCLUDED.asset_id,
+    provider_id = EXCLUDED.provider_id,
+    status = CASE
+      WHEN public.lab_book_entries.status = 'cancelled' THEN 'scheduled'
+      ELSE public.lab_book_entries.status
+    END,
+    description = EXCLUDED.description,
+    subject = EXCLUDED.subject,
+    next_due_at = EXCLUDED.next_due_at;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.roll_forward_equipment_maintenance_alert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  source_id uuid;
+BEGIN
+  IF NEW.source_key LIKE 'maintenance:asset:%:pending' THEN
+    source_id := split_part(NEW.source_key, ':', 3)::uuid;
+
+    IF NEW.status = 'completed' AND OLD.status IS DISTINCT FROM 'completed' THEN
+      UPDATE public.lab_book_entries
+      SET source_key = 'maintenance:asset:' || source_id::text || ':completed:' || NEW.id::text
+      WHERE id = NEW.id;
+
+      UPDATE public.equipment_assets
+      SET last_service_at = NEW.occurred_at,
+          next_service_at = NEW.occurred_at
+            + make_interval(months => maintenance_interval_months)
+      WHERE id = source_id
+        AND maintenance_interval_months IS NOT NULL;
+    ELSIF NEW.status = 'scheduled'
+      AND NEW.occurred_at IS DISTINCT FROM OLD.occurred_at THEN
+      UPDATE public.equipment_assets
+      SET next_service_at = NEW.occurred_at
+      WHERE id = source_id;
+    END IF;
+  ELSIF NEW.source_key LIKE 'maintenance:component:%:pending' THEN
+    source_id := split_part(NEW.source_key, ':', 3)::uuid;
+
+    IF NEW.status = 'completed' AND OLD.status IS DISTINCT FROM 'completed' THEN
+      UPDATE public.lab_book_entries
+      SET source_key = 'maintenance:component:' || source_id::text || ':completed:' || NEW.id::text
+      WHERE id = NEW.id;
+
+      UPDATE public.equipment_components
+      SET last_maintenance_at = NEW.occurred_at,
+          next_maintenance_at = NEW.occurred_at
+            + make_interval(months => maintenance_interval_months)
+      WHERE id = source_id
+        AND maintenance_interval_months IS NOT NULL;
+    ELSIF NEW.status = 'scheduled'
+      AND NEW.occurred_at IS DISTINCT FROM OLD.occurred_at THEN
+      UPDATE public.equipment_components
+      SET next_maintenance_at = NEW.occurred_at
+      WHERE id = source_id;
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.cancel_deleted_equipment_maintenance_alert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  UPDATE public.lab_book_entries
+  SET status = 'cancelled'
+  WHERE source_key = CASE
+    WHEN TG_TABLE_NAME = 'equipment_assets'
+      THEN 'maintenance:asset:' || OLD.id::text || ':pending'
+    ELSE 'maintenance:component:' || OLD.id::text || ':pending'
+  END
+    AND status <> 'completed';
+  RETURN OLD;
+END;
+$$;
 
 DROP TRIGGER IF EXISTS clients_set_updated_at ON public.clients;
 CREATE TRIGGER clients_set_updated_at BEFORE UPDATE ON public.clients
@@ -568,8 +811,39 @@ FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 DROP TRIGGER IF EXISTS equipment_assets_set_updated_at ON public.equipment_assets;
 CREATE TRIGGER equipment_assets_set_updated_at BEFORE UPDATE ON public.equipment_assets
 FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+DROP TRIGGER IF EXISTS equipment_assets_sync_maintenance_alert ON public.equipment_assets;
+CREATE TRIGGER equipment_assets_sync_maintenance_alert
+AFTER INSERT OR UPDATE OF name, provider_id, next_service_at, maintenance_interval_months
+ON public.equipment_assets
+FOR EACH ROW EXECUTE FUNCTION public.sync_equipment_maintenance_alert();
+DROP TRIGGER IF EXISTS equipment_assets_cancel_maintenance_alert ON public.equipment_assets;
+CREATE TRIGGER equipment_assets_cancel_maintenance_alert
+AFTER DELETE ON public.equipment_assets
+FOR EACH ROW EXECUTE FUNCTION public.cancel_deleted_equipment_maintenance_alert();
+DROP TRIGGER IF EXISTS equipment_components_set_updated_at ON public.equipment_components;
+CREATE TRIGGER equipment_components_set_updated_at BEFORE UPDATE ON public.equipment_components
+FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+DROP TRIGGER IF EXISTS equipment_components_sync_maintenance_alert ON public.equipment_components;
+CREATE TRIGGER equipment_components_sync_maintenance_alert
+AFTER INSERT OR UPDATE OF asset_id, name, next_maintenance_at, maintenance_interval_months, notes
+ON public.equipment_components
+FOR EACH ROW EXECUTE FUNCTION public.sync_equipment_maintenance_alert();
+DROP TRIGGER IF EXISTS equipment_components_cancel_maintenance_alert ON public.equipment_components;
+CREATE TRIGGER equipment_components_cancel_maintenance_alert
+AFTER DELETE ON public.equipment_components
+FOR EACH ROW EXECUTE FUNCTION public.cancel_deleted_equipment_maintenance_alert();
 DROP TRIGGER IF EXISTS lab_book_entries_set_updated_at ON public.lab_book_entries;
 CREATE TRIGGER lab_book_entries_set_updated_at BEFORE UPDATE ON public.lab_book_entries
+FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+DROP TRIGGER IF EXISTS lab_book_roll_forward_maintenance_alert ON public.lab_book_entries;
+CREATE TRIGGER lab_book_roll_forward_maintenance_alert
+AFTER UPDATE OF status, occurred_at ON public.lab_book_entries
+FOR EACH ROW EXECUTE FUNCTION public.roll_forward_equipment_maintenance_alert();
+DROP TRIGGER IF EXISTS sample_queue_items_set_updated_at ON public.sample_queue_items;
+CREATE TRIGGER sample_queue_items_set_updated_at BEFORE UPDATE ON public.sample_queue_items
+FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+DROP TRIGGER IF EXISTS sample_queue_segments_set_updated_at ON public.sample_queue_segments;
+CREATE TRIGGER sample_queue_segments_set_updated_at BEFORE UPDATE ON public.sample_queue_segments
 FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 DROP TRIGGER IF EXISTS backup_records_set_updated_at ON public.backup_records;
 CREATE TRIGGER backup_records_set_updated_at BEFORE UPDATE ON public.backup_records
@@ -600,10 +874,137 @@ VALUES (8, 'Normalize credit ledger signs and enforce event-specific amounts')
 ON CONFLICT (version) DO NOTHING;
 
 INSERT INTO app_local.schema_migrations (version, description)
+VALUES (9, 'Add the sample analysis queue and linked lab-book schedule')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO app_local.schema_migrations (version, description)
 VALUES (3, 'Add structured result files, measurements, and branded invoice fields')
 ON CONFLICT (version) DO NOTHING;
 
 INSERT INTO app_local.schema_migrations (version, description)
 VALUES (4, 'Add persistent invoice defaults and payment settings')
+ON CONFLICT (version) DO NOTHING;
+
+UPDATE public.sample_queue_items
+SET status = CASE
+  WHEN status IN ('preparing', 'running', 'quality_review') THEN 'analysing'
+  WHEN status = 'completed' THEN 'completed'
+  ELSE 'queued'
+END
+WHERE status NOT IN ('queued', 'analysing', 'completed');
+
+ALTER TABLE public.sample_queue_items
+  DROP CONSTRAINT IF EXISTS sample_queue_items_status_check;
+ALTER TABLE public.sample_queue_items
+  ADD CONSTRAINT sample_queue_items_status_check
+  CHECK (status IN ('queued', 'analysing', 'completed'));
+
+ALTER TABLE public.lab_book_entries
+  DROP CONSTRAINT IF EXISTS lab_book_entries_status_check;
+ALTER TABLE public.lab_book_entries
+  ADD CONSTRAINT lab_book_entries_status_check
+  CHECK (status IN (
+    'queued', 'analysing', 'completed',
+    'scheduled', 'in_progress', 'failed', 'cancelled'
+  ));
+
+UPDATE public.lab_book_entries
+SET status = CASE status
+  WHEN 'scheduled' THEN 'queued'
+  WHEN 'in_progress' THEN 'analysing'
+  ELSE status
+END
+WHERE source_key LIKE 'sample-queue:%'
+  AND status IN ('scheduled', 'in_progress');
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (10, 'Unify queue and linked calendar statuses')
+ON CONFLICT (version) DO NOTHING;
+
+ALTER TABLE public.sample_queue_items
+  ADD COLUMN IF NOT EXISTS samples_per_week numeric(10, 2);
+
+UPDATE public.sample_queue_items
+SET samples_per_week = greatest(
+  1,
+  round(
+    sample_count::numeric * 7 /
+    greatest(1, estimated_end_at::date - estimated_start_at::date + 1),
+    2
+  )
+)
+WHERE samples_per_week IS NULL;
+
+ALTER TABLE public.sample_queue_items
+  ALTER COLUMN samples_per_week SET DEFAULT 100,
+  ALTER COLUMN samples_per_week SET NOT NULL;
+
+ALTER TABLE public.sample_queue_items
+  DROP CONSTRAINT IF EXISTS sample_queue_items_samples_per_week_check;
+ALTER TABLE public.sample_queue_items
+  ADD CONSTRAINT sample_queue_items_samples_per_week_check
+  CHECK (samples_per_week > 0);
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (11, 'Add queue throughput and cascading duration calculation')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO public.sample_queue_segments
+  (queue_item_id, segment_order, run_position, start_at, end_at)
+SELECT id, 1, queue_position, estimated_start_at, estimated_end_at
+FROM public.sample_queue_items
+ON CONFLICT (queue_item_id, segment_order) DO NOTHING;
+
+UPDATE public.sample_queue_segments AS segment
+SET run_position = queue_item.queue_position
+FROM public.sample_queue_items AS queue_item
+WHERE segment.queue_item_id = queue_item.id
+  AND segment.run_position = 0;
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (12, 'Add interruptible queue run segments')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (13, 'Backfill queue run ordering')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (14, 'Preserve user-edited queue run dates')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO public.equipment_assets (asset_code, name, location, status)
+VALUES
+  ('IRMS-01', 'MAT 253 isotope ratio mass spectrometer', 'Instrument room', 'active'),
+  ('KIEL-01', 'Kiel carbonate preparation device', 'Instrument room', 'active'),
+  ('AIR-COMP-01', 'Air compressor', 'Laboratory', 'active'),
+  ('MILLIQ-01', 'Milli-Q station', 'Laboratory', 'active'),
+  ('FUME-HEPA-01', 'Fume hood HEPA', 'Laboratory', 'active'),
+  ('WASH-01', 'Washing machine', 'Laboratory', 'active'),
+  ('DRY-OVEN-01', 'Drying oven', 'Laboratory', 'active'),
+  ('HVAC-01', 'Air conditioning', 'Laboratory', 'active')
+ON CONFLICT (asset_code) DO NOTHING;
+
+INSERT INTO public.equipment_components (asset_id, name, sort_order)
+SELECT asset.id, component.name, component.sort_order
+FROM public.equipment_assets AS asset
+JOIN (
+  VALUES
+    ('IRMS-01', 'Turbo pump', 0),
+    ('KIEL-01', 'Turbo pump', 0),
+    ('KIEL-01', 'Acid line', 1),
+    ('KIEL-01', 'Viton O-rings', 2),
+    ('KIEL-01', 'Acid reservoir humidity filter', 3)
+) AS component(asset_code, name, sort_order)
+  ON component.asset_code = asset.asset_code
+ON CONFLICT (asset_id, name) DO NOTHING;
+
+UPDATE public.equipment_assets
+SET maintenance_interval_months = maintenance_interval_months
+WHERE maintenance_interval_months IS NOT NULL
+  AND next_service_at IS NOT NULL;
+
+INSERT INTO app_local.schema_migrations (version, description)
+VALUES (14, 'Add equipment components and recurring maintenance alerts')
 ON CONFLICT (version) DO NOTHING;
 `;

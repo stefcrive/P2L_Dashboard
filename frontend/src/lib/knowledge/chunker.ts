@@ -26,6 +26,17 @@ function semanticUnits(text: string, targetCharacters: number) {
     .filter(Boolean);
 }
 
+function isStructuralBoundary(unit: string) {
+  return /^(?:#{1,6}\s+|--\s*\d+\s+of\s+\d+\s*--$)/i.test(unit.trim());
+}
+
+function sectionHeadingBefore(text: string, offset: number) {
+  const matches = Array.from(
+    text.slice(0, offset).matchAll(/^#{1,6}\s+(.{1,180})$/gm)
+  );
+  return matches[matches.length - 1]?.[1]?.trim() ?? '';
+}
+
 function takeOverlap(units: string[], overlapCharacters: number) {
   const overlap: string[] = [];
   let length = 0;
@@ -38,8 +49,8 @@ function takeOverlap(units: string[], overlapCharacters: number) {
 
 export function chunkMessage(
   message: ParsedMessage,
-  targetTokens = 600,
-  overlapTokens = 90,
+  targetTokens = 320,
+  overlapTokens = 50,
 ): KnowledgeChunk[] {
   const targetCharacters = targetTokens * 4;
   const overlapCharacters = overlapTokens * 4;
@@ -61,6 +72,11 @@ export function chunkMessage(
   let currentLength = 0;
 
   for (const unit of units) {
+    if (current.length && isStructuralBoundary(unit)) {
+      groups.push(current);
+      current = [];
+      currentLength = 0;
+    }
     const nextLength = currentLength + unit.length + (current.length ? 2 : 0);
     if (current.length && nextLength > targetCharacters) {
       groups.push(current);
@@ -83,8 +99,10 @@ export function chunkMessage(
     const sourceStartLine =
       message.bodyStartLine + (primary.slice(0, startOffset).match(/\n/g)?.length ?? 0);
     const sourceEndLine = sourceStartLine + (content.match(/\n/g)?.length ?? 0);
+    const sectionHeading = sectionHeadingBefore(primary, startOffset);
     const contextParts = [
       `Subject: ${message.subjectNormalized || '(no subject)'}`,
+      sectionHeading ? `Section: ${sectionHeading}` : null,
       message.dateIso ? `Date: ${message.dateIso.slice(0, 10)}` : null,
       `Analyst: ${message.authorDisplay}`,
       `Source lines: ${sourceStartLine}-${sourceEndLine}`,
@@ -104,6 +122,7 @@ export function chunkMessage(
         threadKey: message.threadKey,
         sourceStartLine,
         sourceEndLine,
+        sectionHeading: sectionHeading || undefined,
         ...message.deterministicMetadata,
       },
     };

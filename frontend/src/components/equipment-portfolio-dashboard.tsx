@@ -220,11 +220,10 @@ export function EquipmentPortfolioDashboard() {
   }
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <PageHeader
         eyebrow="Laboratory settings"
         title="Equipment portfolio"
-        description="Define the instruments and supporting equipment used by the lab. Active portfolio names become material destinations in Inventory."
         actions={
           <Button onClick={openNew}>
             <Plus className="mr-1.5 h-4 w-4" />
@@ -302,13 +301,13 @@ export function EquipmentPortfolioDashboard() {
                   >
                     <TableCell>
                       <p className="font-medium">{asset.name}</p>
-                      <p className="font-mono text-[10px] text-muted-foreground">
+                      <p className="font-mono text-[11px] text-muted-foreground">
                         {asset.asset_code}
                       </p>
                     </TableCell>
                     <TableCell>
                       <p>{[asset.manufacturer, asset.model].filter(Boolean).join(' · ') || '—'}</p>
-                      <p className="font-mono text-[10px] text-muted-foreground">
+                      <p className="font-mono text-[11px] text-muted-foreground">
                         {asset.serial_number ? `SN ${asset.serial_number}` : 'No serial number'}
                       </p>
                     </TableCell>
@@ -361,10 +360,10 @@ export function EquipmentPortfolioDashboard() {
             if (event.currentTarget === event.target) closeModal();
           }}
         >
-          <div className="max-h-[92vh] w-full max-w-2xl overflow-auto rounded-xl border bg-background shadow-2xl">
+          <div className="max-h-[92vh] w-full max-w-2xl overflow-auto rounded-lg border bg-background shadow-2xl">
             <div className="sticky top-0 z-10 flex items-start justify-between border-b bg-background px-5 py-4">
               <div>
-                <p className="font-mono text-[10px] uppercase tracking-wide text-primary">
+                <p className="font-mono text-[11px] uppercase tracking-wide text-primary">
                   Equipment portfolio
                 </p>
                 <h2 id="equipment-title" className="font-display text-lg font-semibold">
@@ -379,7 +378,7 @@ export function EquipmentPortfolioDashboard() {
               </Button>
             </div>
 
-            <div className="grid gap-4 p-5 sm:grid-cols-2">
+            <div className="grid gap-workspace p-3 sm:grid-cols-2">
               <EquipmentField label="Equipment name">
                 <Input
                   value={form.name}
@@ -520,7 +519,7 @@ function EquipmentField({
 }) {
   return (
     <label className={cn('space-y-1.5', className)}>
-      <span className="font-mono text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+      <span className="font-mono text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </span>
       {children}

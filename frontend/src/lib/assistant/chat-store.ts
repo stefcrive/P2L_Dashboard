@@ -1,6 +1,9 @@
 'use client';
+import { postUploadForm } from '@/lib/cloud/upload-client';
 
 import { create } from 'zustand';
+
+import type { KnowledgeRetrievalTrace } from '@/lib/knowledge/types';
 
 export interface AssistantMessage {
   id: string;
@@ -8,6 +11,38 @@ export interface AssistantMessage {
   content: string;
   createdAt: string;
   attachments?: AssistantAttachment[];
+  mode?: 'assistant' | 'knowledge';
+  evidence?: KnowledgeEvidence[];
+  knowledgeEngineNames?: string[];
+  thinking?: boolean;
+  trace?: KnowledgeRetrievalTrace;
+}
+
+export interface KnowledgeEvidence {
+  chunkId: number;
+  sourceId: number;
+  sourceName: string;
+  sourcePath: string;
+  subject: string;
+  author: string;
+  messageDate: string | null;
+  startLine: number;
+  endLine: number;
+  content: string;
+  rerankScore?: number;
+  visual?: {
+    id: number;
+    pageNumber: number;
+    kind: string;
+    caption: string;
+    description: string;
+    altText: string;
+    width: number;
+    height: number;
+    bbox: Record<string, unknown>;
+    imageUrl: string;
+    sourceUrl: string;
+  } | null;
 }
 
 export interface AssistantAttachment {
@@ -226,7 +261,12 @@ export const useAssistantChatStore = create<AssistantChatState>((set, get) => ({
 export async function sendAssistantMessage(
   content: string,
   preferredConversationId?: string | null,
-  files: File[] = []
+  files: File[] = [],
+  options: {
+    knowledgeEngineIds?: string[];
+    knowledgeEngineNames?: string[];
+    thinking?: boolean;
+  } = {}
 ) {
   const trimmed = content.trim();
   if (!trimmed && !files.length) return;
@@ -251,6 +291,8 @@ export async function sendAssistantMessage(
       type: file.type || 'application/octet-stream',
       size: file.size,
     })),
+    knowledgeEngineNames: options.knowledgeEngineNames,
+    thinking: options.thinking,
   });
   store.setPending(conversationId, true);
 
@@ -263,16 +305,37 @@ export async function sendAssistantMessage(
     );
     const formData = new FormData();
     formData.set('messages', JSON.stringify(messages));
+    if (options.knowledgeEngineIds !== undefined) {
+      formData.set(
+        'knowledgeEngineIds',
+        JSON.stringify(options.knowledgeEngineIds)
+      );
+    }
+    formData.set('thinking', String(Boolean(options.thinking)));
     files.forEach((file) => formData.append('files', file));
-    const response = await fetch('/api/assistant', {
-      method: 'POST',
-      body: formData,
-    });
+    const controller = new AbortController();
+    const requestTimeout = window.setTimeout(() => controller.abort(), 165_000);
+    let response: Response;
+    try {
+      response = await postUploadForm('/api/assistant', formData, controller.signal);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(
+          'The assistant request timed out and was stopped. Refresh queue data before retrying.'
+        );
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(requestTimeout);
+    }
     const payload = (await response.json().catch(() => null)) as
       | {
           message?: string;
           error?: string;
           attachments?: AssistantAttachment[];
+          mode?: 'assistant' | 'knowledge';
+          evidence?: KnowledgeEvidence[];
+          trace?: KnowledgeRetrievalTrace;
         }
       | null;
     if (payload?.attachments?.length) {
@@ -285,7 +348,18 @@ export async function sendAssistantMessage(
     }
     useAssistantChatStore
       .getState()
-      .addMessage(conversationId, { role: 'assistant', content: payload.message });
+      .addMessage(conversationId, {
+        role: 'assistant',
+        content: payload.message,
+        mode: payload.mode ?? 'assistant',
+        evidence: payload.evidence ?? [],
+        thinking: options.thinking,
+        trace: payload.trace,
+        knowledgeEngineNames:
+          payload.mode === 'knowledge'
+            ? options.knowledgeEngineNames
+            : undefined,
+      });
   } catch (error) {
     useAssistantChatStore
       .getState()

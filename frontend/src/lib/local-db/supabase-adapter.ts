@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { getLocalAppDatabase } from './db';
+import { cloudEnabled } from '@/lib/cloud/database';
 
 type QueryOperation = 'select' | 'insert' | 'upsert' | 'update' | 'delete';
 type Row = Record<string, unknown>;
@@ -371,6 +372,12 @@ export class LocalSupabaseQueryBuilder
   private async executeMutation(): Promise<QueryResult> {
     const database = await getLocalAppDatabase();
     const table = `public.${identifier(this.tableName)}`;
+    const jsonColumns = new Set(cloudEnabled() ? (await database.query<{column_name: string}>(
+      "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND data_type IN ('json','jsonb')",
+      [this.tableName],
+    )).rows.map(row => row.column_name) : []);
+    const serialize = (column: string, value: unknown) =>
+      value == null ? null : jsonColumns.has(column) ? JSON.stringify(value) : value;
     let rows: Row[] = [];
 
     if (this.operation === 'insert' || this.operation === 'upsert') {
@@ -385,7 +392,7 @@ export class LocalSupabaseQueryBuilder
       const parameters: unknown[] = [];
       const valueGroups = values.map((row) => {
         const placeholders = columns.map((column) => {
-          parameters.push(row[column] ?? null);
+          parameters.push(serialize(column, row[column]));
           return `$${parameters.length}`;
         });
         return `(${placeholders.join(', ')})`;
@@ -419,7 +426,7 @@ export class LocalSupabaseQueryBuilder
       if (!columns.length) throw new Error('No fields were provided for update.');
       const parameters: unknown[] = [];
       const assignments = columns.map((column) => {
-        parameters.push(payload[column] ?? null);
+        parameters.push(serialize(column, payload[column]));
         return `${identifier(column)} = $${parameters.length}`;
       });
       const where = this.buildWhere(parameters);

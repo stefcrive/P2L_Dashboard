@@ -30,8 +30,8 @@ function invariant(condition, message) {
 async function main() {
   const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
   const repositoryRoot = path.resolve(scriptDirectory, '..');
-  const rawDirectory = path.join(repositoryRoot, 'Raw ISOGEOCHEM data');
-  const cleanDirectory = path.join(repositoryRoot, 'Merged_text_files');
+  const rawDirectory = path.join(repositoryRoot, 'Raw ISOGEOCHEM data backup');
+  const cleanDirectory = path.join(repositoryRoot, 'Raw ISOGEOCHEM data');
   const auditDirectory = path.join(repositoryRoot, 'cleanup_audit');
   const manifest = JSON.parse(
     await readFile(path.join(auditDirectory, 'manifest.json'), 'utf8'),

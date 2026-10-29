@@ -34,6 +34,7 @@ import {
 import { EmptyState, StatusPill } from '@/components/dashboard/primitives';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { labBookEntryColorClass } from '@/lib/lab-book/entry-colors';
 import {
   createResource,
   deleteResource,
@@ -56,6 +57,7 @@ type EntryType =
   | 'quality_control'
   | 'software'
   | 'infrastructure'
+  | 'sample_analysis'
   | 'general';
 type DatePrecision = 'day' | 'month' | 'year' | 'cutoff' | 'estimated';
 type EntryStatus =
@@ -77,8 +79,30 @@ type Asset = {
   provider_id: string | null;
   last_service_at: string | null;
   next_service_at: string | null;
+  maintenance_interval_months: number | null;
   notes: string | null;
   provider: Provider | null;
+};
+
+type EquipmentComponent = {
+  id: string;
+  asset_id: string;
+  name: string;
+  sort_order: number;
+  maintenance_interval_months: number | null;
+  last_maintenance_at: string | null;
+  next_maintenance_at: string | null;
+  notes: string | null;
+};
+
+type EquipmentComponentDraft = {
+  key: string;
+  id: string | null;
+  name: string;
+  maintenanceIntervalMonths: string;
+  lastMaintenanceAt: string;
+  nextMaintenanceAt: string;
+  notes: string;
 };
 
 type LabEntry = {
@@ -132,70 +156,94 @@ const entryTypeMeta: Record<
   publication: {
     label: 'Publication',
     short: 'Publication',
-    color: 'bg-violet-500',
+    color: labBookEntryColorClass('publication'),
     icon: BookMarked,
   },
   masters_delivery: {
     label: 'MSc delivery',
     short: 'MSc',
-    color: 'bg-sky-500',
+    color: labBookEntryColorClass('masters_delivery'),
     icon: GraduationCap,
   },
   phd_delivery: {
     label: 'PhD delivery',
     short: 'PhD',
-    color: 'bg-indigo-500',
+    color: labBookEntryColorClass('phd_delivery'),
     icon: ScrollText,
   },
   results_delivery: {
     label: 'Results delivery',
     short: 'Results',
-    color: 'bg-emerald-500',
+    color: labBookEntryColorClass('results_delivery'),
     icon: FlaskConical,
   },
   maintenance: {
     label: 'Maintenance',
     short: 'Maintenance',
-    color: 'bg-amber-500',
+    color: labBookEntryColorClass('maintenance'),
     icon: Wrench,
   },
   calibration: {
     label: 'Calibration',
     short: 'Calibration',
-    color: 'bg-cyan-500',
+    color: labBookEntryColorClass('calibration'),
     icon: Gauge,
   },
   incident: {
     label: 'Technical issue',
     short: 'Issue',
-    color: 'bg-rose-500',
+    color: labBookEntryColorClass('incident'),
     icon: AlertTriangle,
   },
   quality_control: {
     label: 'Quality control',
     short: 'Quality',
-    color: 'bg-teal-500',
+    color: labBookEntryColorClass('quality_control'),
     icon: ShieldCheck,
   },
   software: {
     label: 'Software',
     short: 'Software',
-    color: 'bg-blue-500',
+    color: labBookEntryColorClass('software'),
     icon: Monitor,
   },
   infrastructure: {
     label: 'Infrastructure',
     short: 'Infrastructure',
-    color: 'bg-orange-500',
+    color: labBookEntryColorClass('infrastructure'),
     icon: Zap,
+  },
+  sample_analysis: {
+    label: 'Sample analysis',
+    short: 'Analysis',
+    color: labBookEntryColorClass('sample_analysis'),
+    icon: FlaskConical,
   },
   general: {
     label: 'General note',
     short: 'Note',
-    color: 'bg-slate-400',
+    color: labBookEntryColorClass('general'),
     icon: FileText,
   },
 };
+
+function getEntryTypeMeta(entryType: string) {
+  const knownMeta = entryTypeMeta[entryType as EntryType];
+  if (knownMeta) return knownMeta;
+
+  const label = entryType
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+
+  return {
+    label: label || 'Other',
+    short: label || 'Other',
+    color: labBookEntryColorClass(entryType),
+    icon: FileText,
+  };
+}
 
 const allEntryTypes = Object.keys(entryTypeMeta) as EntryType[];
 const academicEntryTypes: EntryType[] = [
@@ -266,6 +314,14 @@ function statusTone(status: string) {
   return 'neutral' as const;
 }
 
+function isFutureSampleAnalysis(entry: LabEntry, presentTime: number) {
+  return (
+    entry.entry_type === 'sample_analysis' &&
+    entry.status === 'scheduled' &&
+    new Date(entry.occurred_at).getTime() > presentTime
+  );
+}
+
 function blankDraft() {
   return {
     entryType: 'results_delivery' as EntryType,
@@ -302,10 +358,14 @@ export function LabBookDashboard() {
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+  const [showFutureQueue, setShowFutureQueue] = useState(false);
   const [editingEntry, setEditingEntry] = useState<LabEntry | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState(blankDraft);
   const [message, setMessage] = useState('');
+  const editingMaintenanceAlert = Boolean(
+    editingEntry?.source_key?.startsWith('maintenance:')
+  );
 
   const providersQuery = useQuery({
     queryKey: ['operations', 'providers'],
@@ -315,6 +375,12 @@ export function LabBookDashboard() {
   const assetsQuery = useQuery({
     queryKey: ['operations', 'assets'],
     queryFn: () => fetchResource<Asset>('assets'),
+    retry: false,
+  });
+  const componentsQuery = useQuery({
+    queryKey: ['operations', 'equipment-components'],
+    queryFn: () =>
+      fetchResource<EquipmentComponent>('equipment-components'),
     retry: false,
   });
   const entriesQuery = useQuery({
@@ -367,11 +433,13 @@ export function LabBookDashboard() {
 
   const entries = useMemo(() => entriesQuery.data ?? [], [entriesQuery.data]);
   const assets = assetsQuery.data ?? [];
+  const components = componentsQuery.data ?? [];
   const providers = providersQuery.data ?? [];
   const backups = backupsQuery.data ?? [];
   const databaseError =
     (entriesQuery.error as Error | null)?.message ??
     (assetsQuery.error as Error | null)?.message ??
+    (componentsQuery.error as Error | null)?.message ??
     (backupsQuery.error as Error | null)?.message;
 
   const years = useMemo(
@@ -386,10 +454,23 @@ export function LabBookDashboard() {
     [entries]
   );
 
+  const futureQueueEntries = useMemo(() => {
+    const presentTime = Date.now();
+    return entries
+      .filter((entry) => isFutureSampleAnalysis(entry, presentTime))
+      .sort(
+        (left, right) =>
+          new Date(left.occurred_at).getTime() -
+          new Date(right.occurred_at).getTime()
+      );
+  }, [entries]);
+
   const filteredEntries = useMemo(() => {
     const needle = search.trim().toLocaleLowerCase();
+    const presentTime = Date.now();
     const visible = entries.filter((entry) => {
       if (academicEntryTypes.includes(entry.entry_type)) return false;
+      if (isFutureSampleAnalysis(entry, presentTime)) return false;
       if (typeFilter !== 'all' && entry.entry_type !== typeFilter) return false;
       if (statusFilter !== 'all' && entry.status !== statusFilter) return false;
       if (
@@ -417,7 +498,7 @@ export function LabBookDashboard() {
     });
     const value = (entry: LabEntry): string | number => {
       if (sortKey === 'date') return new Date(entry.occurred_at).getTime();
-      if (sortKey === 'type') return entryTypeMeta[entry.entry_type].label;
+      if (sortKey === 'type') return getEntryTypeMeta(entry.entry_type).label;
       if (sortKey === 'title') return entry.title;
       if (sortKey === 'subject') return entry.subject ?? '';
       if (sortKey === 'quantity') return entry.quantity ?? -1;
@@ -499,6 +580,14 @@ export function LabBookDashboard() {
 
   function submitEntry(event: FormEvent) {
     event.preventDefault();
+    if (editingMaintenanceAlert) {
+      saveMutation.mutate({
+        status: draft.status,
+        occurred_at: new Date(draft.occurredAt).toISOString(),
+        next_due_at: new Date(draft.occurredAt).toISOString(),
+      });
+      return;
+    }
     saveMutation.mutate({
       entry_type: draft.entryType,
       title: draft.title.trim(),
@@ -550,21 +639,17 @@ export function LabBookDashboard() {
   }
 
   return (
-    <div className="mx-auto max-w-[1760px] space-y-5">
-      <header className="flex flex-col gap-2 border-b pb-4 sm:flex-row sm:items-end sm:justify-between">
+    <div className="min-w-0 space-y-workspace">
+      <header className="flex flex-col gap-2 border-b pb-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-cyan-700 dark:text-cyan-300">
+          <p className="font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-cyan-700 dark:text-cyan-300">
             P2L scientific record
           </p>
-          <h1 className="mt-1 font-display text-2xl font-semibold tracking-[-0.025em]">
+          <h1 className="mt-1 font-display text-lg font-semibold tracking-[-0.025em]">
             Lab book
           </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Results, interventions, scholarly output, equipment, and backup
-            evidence.
-          </p>
         </div>
-        <p className="font-mono text-[10px] text-muted-foreground">
+        <p className="font-mono text-[11px] text-muted-foreground">
           {years.length
             ? `${years[years.length - 1]}—${years[0]}`
             : 'No records'}
@@ -591,7 +676,7 @@ export function LabBookDashboard() {
             aria-selected={activeView === value}
             onClick={() => setActiveView(value)}
             className={cn(
-              'relative flex h-10 items-center gap-2 px-3 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground',
+              'relative flex h-8 items-center gap-2 px-3 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground',
               activeView === value &&
                 'text-foreground after:absolute after:inset-x-2 after:-bottom-px after:h-0.5 after:bg-cyan-500'
             )}
@@ -602,14 +687,14 @@ export function LabBookDashboard() {
       </div>
 
       {activeView === 'records' ? (
-        <section className="overflow-hidden rounded-xl border bg-card shadow-sm">
-          <div className="border-b px-4 py-3">
+        <section className="overflow-hidden rounded-lg border bg-card shadow-sm">
+          <div className="border-b p-panel">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
               <div className="min-w-0 lg:mr-auto">
                 <h2 className="text-sm font-semibold">Chronological record</h2>
                 <p className="text-[11px] text-muted-foreground">
                   {filteredEntries.length.toLocaleString('en-US')} matching
-                  records · click a row to inspect or edit
+                  records through the present · click a row to inspect or edit
                 </p>
               </div>
               <label className="relative">
@@ -626,7 +711,31 @@ export function LabBookDashboard() {
                 <Plus className="mr-2 h-4 w-4" /> Add record
               </Button>
             </div>
-            <div className="mt-3 grid gap-2 border-t pt-3 sm:grid-cols-2 lg:grid-cols-[180px_150px_120px_auto_1fr]">
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant={showFutureQueue ? 'secondary' : 'outline'}
+                aria-expanded={showFutureQueue}
+                aria-controls="future-sample-queue"
+                disabled={!futureQueueEntries.length}
+                onClick={() => setShowFutureQueue((value) => !value)}
+              >
+                <CalendarClock className="mr-2 h-3.5 w-3.5" />
+                {futureQueueEntries.length
+                  ? `Future sample queue (${futureQueueEntries.length})`
+                  : 'No future analyses'}
+                <ChevronRight
+                  className={cn(
+                    'ml-2 h-3.5 w-3.5 transition-transform',
+                    showFutureQueue && 'rotate-90'
+                  )}
+                />
+              </Button>
+              <p className="text-[11px] text-muted-foreground">
+                Planned analyses stay separate from the laboratory record.
+              </p>
+            </div>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-[180px_150px_120px_auto_1fr]">
               <select
                 aria-label="Filter by record type"
                 value={typeFilter}
@@ -690,8 +799,60 @@ export function LabBookDashboard() {
               ) : null}
             </div>
           </div>
+          {showFutureQueue ? (
+            <div
+              id="future-sample-queue"
+              className="border-b bg-cyan-50/35 dark:bg-cyan-950/10"
+            >
+              <div className="flex items-end justify-between gap-3 border-b p-panel">
+                <div>
+                  <h3 className="text-xs font-semibold">Upcoming analyses</h3>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    Nearest scheduled start first
+                  </p>
+                </div>
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  {futureQueueEntries.length} scheduled
+                </span>
+              </div>
+              <div className="max-h-72 overflow-y-auto overscroll-contain">
+                {futureQueueEntries.map((entry) => (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    onClick={() => openEdit(entry)}
+                    className="grid w-full gap-1 border-b p-panel text-left transition-colors last:border-b-0 hover:bg-cyan-50 focus-visible:bg-cyan-50 sm:grid-cols-[150px_minmax(0,1fr)_110px] sm:items-center dark:hover:bg-cyan-950/25 dark:focus-visible:bg-cyan-950/25"
+                  >
+                    <span className="font-mono text-[11px] font-medium tabular-nums text-cyan-800 dark:text-cyan-200">
+                      {formatRecordDate(entry.occurred_at, entry.date_precision)}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-xs font-semibold">
+                        {entry.title}
+                      </span>
+                      <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                        {[entry.subject, entry.institution, entry.project_reference]
+                          .filter(Boolean)
+                          .join(' · ') || 'Sample analysis'}
+                      </span>
+                    </span>
+                    <span className="flex items-center gap-2 sm:justify-end">
+                      {entry.quantity !== null ? (
+                        <span className="font-mono text-[11px] text-muted-foreground">
+                          {entry.quantity} analyses
+                        </span>
+                      ) : null}
+                      <StatusPill tone={statusTone(entry.status)}>
+                        {statusLabel(entry)}
+                      </StatusPill>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {pagedEntries.length ? (
-            <div className="overflow-x-auto">
+            <div className="workspace-table overflow-auto" tabIndex={0} role="region" aria-label="Laboratory records">
               <table className="w-full min-w-[1060px] text-left text-xs">
                 <thead className="border-b bg-slate-50/80 font-mono text-[9px] uppercase tracking-[0.08em] text-muted-foreground dark:bg-slate-900/70">
                   <tr>
@@ -749,7 +910,7 @@ export function LabBookDashboard() {
                 </thead>
                 <tbody className="divide-y">
                   {pagedEntries.map((entry) => {
-                    const meta = entryTypeMeta[entry.entry_type];
+                    const meta = getEntryTypeMeta(entry.entry_type);
                     const Icon = meta.icon;
                     return (
                       <tr
@@ -757,7 +918,7 @@ export function LabBookDashboard() {
                         onClick={() => openEdit(entry)}
                         className="group cursor-pointer align-top transition-colors hover:bg-cyan-50/50 dark:hover:bg-cyan-950/15"
                       >
-                        <td className="relative px-4 py-3.5 pl-6 font-mono text-[11px] font-medium tabular-nums whitespace-nowrap">
+                        <td className="relative px-2 py-1.5 pl-4 font-mono text-[11px] font-medium tabular-nums whitespace-nowrap">
                           <span
                             className={cn(
                               'absolute inset-y-0 left-0 w-1',
@@ -775,22 +936,19 @@ export function LabBookDashboard() {
                             </span>
                           ) : null}
                         </td>
-                        <td className="max-w-[520px] px-3 py-3.5">
+                        <td className="max-w-[520px] px-2 py-1.5">
                           <p className="font-semibold leading-5 text-foreground">
                             {entry.title}
                           </p>
-                          {entry.description ? (
-                            <p className="mt-1 line-clamp-2 max-w-[70ch] text-[11px] leading-4 text-muted-foreground">
-                              {entry.description}
-                            </p>
-                          ) : null}
-                          {entry.source_reference ? (
-                            <p className="mt-1.5 truncate font-mono text-[9px] text-slate-400">
-                              SOURCE · {entry.source_reference}
-                            </p>
+                          {entry.description || entry.source_reference ? (
+                            <details onClick={(event) => event.stopPropagation()} className="text-[11px] text-muted-foreground">
+                              <summary className="w-fit cursor-pointer rounded-sm py-0.5">Details and source</summary>
+                              {entry.description ? <p className="max-w-[70ch] whitespace-normal py-1 leading-4">{entry.description}</p> : null}
+                              {entry.source_reference ? <p className="max-w-[70ch] break-all py-1 font-mono">Source · {entry.source_reference}</p> : null}
+                            </details>
                           ) : null}
                         </td>
-                        <td className="px-3 py-3.5">
+                        <td className="px-2 py-1.5">
                           <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] font-medium">
                             <span
                               className={cn(
@@ -804,14 +962,14 @@ export function LabBookDashboard() {
                             {meta.short}
                           </span>
                         </td>
-                        <td className="px-3 py-3.5">
+                        <td className="px-2 py-1.5">
                           <p className="font-medium">
                             {entry.subject ??
                               entry.project_reference ??
                               entry.asset?.asset_code ??
                               '—'}
                           </p>
-                          <p className="mt-0.5 truncate text-[10px] text-muted-foreground">
+                          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
                             {entry.project_reference && entry.subject
                               ? entry.project_reference
                               : (entry.institution ??
@@ -820,18 +978,20 @@ export function LabBookDashboard() {
                                 '')}
                           </p>
                         </td>
-                        <td className="px-3 py-3.5 text-right font-mono font-semibold tabular-nums">
+                        <td className="px-2 py-1.5 text-right font-mono font-semibold tabular-nums">
                           {entry.quantity === null
                             ? '—'
                             : entry.quantity.toLocaleString('en-US')}
                         </td>
-                        <td className="px-3 py-3.5">
+                        <td className="px-2 py-1.5">
                           <StatusPill tone={statusTone(entry.status)}>
                             {statusLabel(entry)}
                           </StatusPill>
                         </td>
-                        <td className="px-3 py-3.5 text-right">
-                          <Pencil className="ml-auto h-3.5 w-3.5 text-slate-300 transition-colors group-hover:text-cyan-600" />
+                        <td className="px-2 py-1.5 text-right">
+                          <button type="button" onClick={(event) => { event.stopPropagation(); openEdit(entry); }} aria-label={`Edit ${entry.title}`} className="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-primary">
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
                         </td>
                       </tr>
                     );
@@ -841,8 +1001,8 @@ export function LabBookDashboard() {
             </div>
           ) : (
             <EmptyState
-              title="No matching records"
-              description="Change the search or filters, or add a new lab-book record."
+              title={entriesQuery.isPending ? 'Loading laboratory records' : 'No matching records'}
+              description={entriesQuery.isPending ? 'Retrieving the laboratory chronology.' : 'Change the search or filters, or add a new lab-book record.'}
             />
           )}
           <div className="flex flex-col gap-3 border-t bg-slate-50/60 px-4 py-3 text-[11px] text-muted-foreground sm:flex-row sm:items-center dark:bg-slate-900/40">
@@ -899,7 +1059,11 @@ export function LabBookDashboard() {
       ) : null}
 
       {activeView === 'equipment' ? (
-        <EquipmentView assets={assets} providers={providers} />
+        <EquipmentView
+          assets={assets}
+          components={components}
+          providers={providers}
+        />
       ) : null}
       {activeView === 'backups' ? <BackupsView backups={backups} /> : null}
 
@@ -939,8 +1103,14 @@ export function LabBookDashboard() {
                 </button>
               </div>
 
-              <div className="space-y-5 p-5">
-                {editingEntry?.source_key ? (
+              <div className="space-y-3 p-3">
+                {editingMaintenanceAlert ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+                    This alert is generated from the equipment schedule. You
+                    can reschedule it or update its status here; manage its
+                    identity, interval, and components from Equipment.
+                  </div>
+                ) : editingEntry?.source_key ? (
                   <div className="rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] leading-5 text-cyan-900 dark:border-cyan-900 dark:bg-cyan-950/40 dark:text-cyan-200">
                     This record was reconstructed from source material. Edits
                     are preserved and the original source remains linked for
@@ -952,6 +1122,7 @@ export function LabBookDashboard() {
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Record type">
                       <select
+                        disabled={editingMaintenanceAlert}
                         value={draft.entryType}
                         onChange={(event) =>
                           setDraft((value) => ({
@@ -982,14 +1153,19 @@ export function LabBookDashboard() {
                         <option value="completed">Completed / delivered</option>
                         <option value="in_progress">Ongoing</option>
                         <option value="scheduled">Scheduled</option>
-                        <option value="failed">Failed</option>
-                        <option value="cancelled">Cancelled</option>
+                        {!editingMaintenanceAlert ? (
+                          <>
+                            <option value="failed">Failed</option>
+                            <option value="cancelled">Cancelled</option>
+                          </>
+                        ) : null}
                       </select>
                     </Field>
                   </div>
                   <Field label="Title">
                     <Input
                       required
+                      readOnly={editingMaintenanceAlert}
                       value={draft.title}
                       onChange={(event) =>
                         setDraft((value) => ({
@@ -1015,6 +1191,7 @@ export function LabBookDashboard() {
                     </Field>
                     <Field label="Date precision">
                       <select
+                        disabled={editingMaintenanceAlert}
                         value={draft.datePrecision}
                         onChange={(event) =>
                           setDraft((value) => ({
@@ -1034,7 +1211,8 @@ export function LabBookDashboard() {
                   </div>
                 </EditorSection>
 
-                <EditorSection title="Scientific context">
+                {!editingMaintenanceAlert ? (
+                  <EditorSection title="Scientific context">
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Person / recipient">
                       <Input
@@ -1126,9 +1304,11 @@ export function LabBookDashboard() {
                       className={cn(textareaClassName, 'min-h-32 leading-5')}
                     />
                   </Field>
-                </EditorSection>
+                  </EditorSection>
+                ) : null}
 
-                <EditorSection title="Traceability">
+                {!editingMaintenanceAlert ? (
+                  <EditorSection title="Traceability">
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Performed by">
                       <Input
@@ -1197,11 +1377,24 @@ export function LabBookDashboard() {
                       placeholder="File, email, notebook page, DOI…"
                     />
                   </Field>
-                </EditorSection>
+                  </EditorSection>
+                ) : null}
               </div>
 
               <div className="sticky bottom-0 flex items-center gap-2 border-t bg-background/95 px-5 py-4 backdrop-blur">
-                {editingEntry ? (
+                {editingMaintenanceAlert ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      setEditorOpen(false);
+                      setEditingEntry(null);
+                      setActiveView('equipment');
+                    }}
+                  >
+                    <Wrench className="mr-2 h-3.5 w-3.5" /> Manage schedule
+                  </Button>
+                ) : editingEntry ? (
                   <Button
                     type="button"
                     variant="outline"
@@ -1315,7 +1508,7 @@ function AcademicView({
     if (!academicEntryTypes.includes(entry.entry_type)) return false;
     if (!needle) return true;
     return [
-      entryTypeMeta[entry.entry_type].label,
+      getEntryTypeMeta(entry.entry_type).label,
       entry.title,
       entry.subject,
       entry.institution,
@@ -1347,8 +1540,8 @@ function AcademicView({
     );
 
   return (
-    <section className="overflow-hidden rounded-xl border bg-card shadow-sm">
-      <div className="border-b px-4 py-3">
+    <section className="overflow-hidden rounded-lg border bg-card shadow-sm">
+      <div className="border-b p-panel">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <div className="min-w-0 lg:mr-auto">
             <h2 className="text-sm font-semibold">
@@ -1389,7 +1582,7 @@ function AcademicView({
         <div className="min-w-0 xl:border-r">
           <div className="flex items-center gap-2 border-b bg-slate-50/70 px-4 py-2.5 dark:bg-slate-900/50">
             <BookMarked className="h-3.5 w-3.5 text-violet-600" />
-            <h3 className="font-mono text-[10px] font-semibold uppercase tracking-[0.08em]">
+            <h3 className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em]">
               Publication list
             </h3>
           </div>
@@ -1421,7 +1614,7 @@ function AcademicView({
                       </td>
                       <td className="px-3 py-3">
                         <p className="font-semibold leading-5">{entry.title}</p>
-                        <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-muted-foreground">
+                        <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
                           {entry.subject ?? 'Authors not recorded'}
                         </p>
                       </td>
@@ -1492,10 +1685,10 @@ function DegreeList({
             tone === 'sky' ? 'text-sky-600' : 'text-indigo-600'
           )}
         />
-        <h3 className="font-mono text-[10px] font-semibold uppercase tracking-[0.08em]">
+        <h3 className="font-mono text-[11px] font-semibold uppercase tracking-[0.08em]">
           {title}
         </h3>
-        <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+        <span className="ml-auto font-mono text-[11px] text-muted-foreground">
           {entries.length}
         </span>
       </div>
@@ -1535,17 +1728,72 @@ function DegreeList({
   );
 }
 
+function newComponentDraft(): EquipmentComponentDraft {
+  return {
+    key: crypto.randomUUID(),
+    id: null,
+    name: '',
+    maintenanceIntervalMonths: '',
+    lastMaintenanceAt: '',
+    nextMaintenanceAt: '',
+    notes: '',
+  };
+}
+
+function componentToDraft(
+  component: EquipmentComponent
+): EquipmentComponentDraft {
+  return {
+    key: component.id,
+    id: component.id,
+    name: component.name,
+    maintenanceIntervalMonths:
+      component.maintenance_interval_months?.toString() ?? '',
+    lastMaintenanceAt: toLocalInput(component.last_maintenance_at),
+    nextMaintenanceAt: toLocalInput(component.next_maintenance_at),
+    notes: component.notes ?? '',
+  };
+}
+
+function componentPayload(
+  component: EquipmentComponentDraft,
+  assetId: string,
+  sortOrder: number
+) {
+  return {
+    asset_id: assetId,
+    name: component.name.trim(),
+    sort_order: sortOrder,
+    maintenance_interval_months: component.maintenanceIntervalMonths
+      ? Number(component.maintenanceIntervalMonths)
+      : null,
+    last_maintenance_at: component.lastMaintenanceAt
+      ? new Date(component.lastMaintenanceAt).toISOString()
+      : null,
+    next_maintenance_at: component.nextMaintenanceAt
+      ? new Date(component.nextMaintenanceAt).toISOString()
+      : null,
+    notes: component.notes.trim() || null,
+  };
+}
+
 function EquipmentView({
   assets,
+  components,
   providers,
 }: {
   assets: Asset[];
+  components: EquipmentComponent[];
   providers: Provider[];
 }) {
   const queryClient = useQueryClient();
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
   const [message, setMessage] = useState('');
+  const [scheduleError, setScheduleError] = useState('');
+  const [componentDrafts, setComponentDrafts] = useState<
+    EquipmentComponentDraft[]
+  >([]);
   const [draft, setDraft] = useState({
     code: '',
     name: '',
@@ -1557,21 +1805,64 @@ function EquipmentView({
     providerId: '',
     lastServiceAt: '',
     nextServiceAt: '',
+    maintenanceIntervalMonths: '',
     notes: '',
   });
 
   const saveMutation = useMutation({
-    mutationFn: async (payload: Record<string, unknown>) => {
-      if (editingAsset)
-        return updateResource('assets', editingAsset.id, payload);
-      return createResource('assets', payload);
+    mutationFn: async ({
+      assetPayload,
+      componentDrafts: nextComponents,
+    }: {
+      assetPayload: Record<string, unknown>;
+      componentDrafts: EquipmentComponentDraft[];
+    }) => {
+      const asset = editingAsset
+        ? await updateResource<Asset>('assets', editingAsset.id, assetPayload)
+        : await createResource<Asset>('assets', assetPayload);
+      const priorComponents = components.filter(
+        (component) => component.asset_id === asset.id
+      );
+      const retainedIds = new Set(
+        nextComponents.flatMap((component) =>
+          component.id ? [component.id] : []
+        )
+      );
+
+      await Promise.all([
+        ...nextComponents.map((component, index) =>
+          component.id
+            ? updateResource(
+                'equipment-components',
+                component.id,
+                componentPayload(component, asset.id, index)
+              )
+            : createResource(
+                'equipment-components',
+                componentPayload(component, asset.id, index)
+              )
+        ),
+        ...priorComponents
+          .filter((component) => !retainedIds.has(component.id))
+          .map((component) =>
+            deleteResource('equipment-components', component.id)
+          ),
+      ]);
+
+      return asset;
     },
     onSuccess: async () => {
       setMessage(editingAsset ? 'Equipment updated.' : 'Equipment added.');
       setEditorOpen(false);
       setEditingAsset(null);
+      setComponentDrafts([]);
+      setScheduleError('');
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['operations', 'assets'] }),
+        queryClient.invalidateQueries({
+          queryKey: ['operations', 'equipment-components'],
+        }),
+        queryClient.invalidateQueries({ queryKey: ['operations', 'lab-book'] }),
         queryClient.invalidateQueries({ queryKey: ['operations-summary'] }),
         queryClient.invalidateQueries({
           queryKey: ['operations-header-summary'],
@@ -1607,6 +1898,7 @@ function EquipmentView({
       providerId: '',
       lastServiceAt: '',
       nextServiceAt: '',
+      maintenanceIntervalMonths: '',
       notes: '',
     };
   }
@@ -1614,6 +1906,8 @@ function EquipmentView({
   function openNewAsset() {
     setEditingAsset(null);
     setDraft(blankAsset());
+    setComponentDrafts([]);
+    setScheduleError('');
     setMessage('');
     setEditorOpen(true);
   }
@@ -1631,30 +1925,65 @@ function EquipmentView({
       providerId: asset.provider_id ?? '',
       lastServiceAt: toLocalInput(asset.last_service_at),
       nextServiceAt: toLocalInput(asset.next_service_at),
+      maintenanceIntervalMonths:
+        asset.maintenance_interval_months?.toString() ?? '',
       notes: asset.notes ?? '',
     });
+    setComponentDrafts(
+      components
+        .filter((component) => component.asset_id === asset.id)
+        .sort((left, right) => left.sort_order - right.sort_order)
+        .map(componentToDraft)
+    );
+    setScheduleError('');
     setMessage('');
     setEditorOpen(true);
   }
 
   function saveAsset(event: FormEvent) {
     event.preventDefault();
+    const assetScheduleIsPartial = Boolean(draft.nextServiceAt) !==
+      Boolean(draft.maintenanceIntervalMonths);
+    const incompleteComponent = componentDrafts.find(
+      (component) =>
+        Boolean(component.nextMaintenanceAt) !==
+        Boolean(component.maintenanceIntervalMonths)
+    );
+    if (assetScheduleIsPartial) {
+      setScheduleError(
+        'Equipment alerts need both a next service date and a repeat interval.'
+      );
+      return;
+    }
+    if (incompleteComponent) {
+      setScheduleError(
+        `${incompleteComponent.name || 'This component'} needs both a next maintenance date and a repeat interval.`
+      );
+      return;
+    }
+    setScheduleError('');
     saveMutation.mutate({
-      asset_code: draft.code.trim(),
-      name: draft.name.trim(),
-      manufacturer: draft.manufacturer.trim() || null,
-      model: draft.model.trim() || null,
-      serial_number: draft.serialNumber.trim() || null,
-      location: draft.location.trim() || null,
-      status: draft.status,
-      provider_id: draft.providerId || null,
-      last_service_at: draft.lastServiceAt
-        ? new Date(draft.lastServiceAt).toISOString()
-        : null,
-      next_service_at: draft.nextServiceAt
-        ? new Date(draft.nextServiceAt).toISOString()
-        : null,
-      notes: draft.notes.trim() || null,
+      assetPayload: {
+        asset_code: draft.code.trim(),
+        name: draft.name.trim(),
+        manufacturer: draft.manufacturer.trim() || null,
+        model: draft.model.trim() || null,
+        serial_number: draft.serialNumber.trim() || null,
+        location: draft.location.trim() || null,
+        status: draft.status,
+        provider_id: draft.providerId || null,
+        last_service_at: draft.lastServiceAt
+          ? new Date(draft.lastServiceAt).toISOString()
+          : null,
+        next_service_at: draft.nextServiceAt
+          ? new Date(draft.nextServiceAt).toISOString()
+          : null,
+        maintenance_interval_months: draft.maintenanceIntervalMonths
+          ? Number(draft.maintenanceIntervalMonths)
+          : null,
+        notes: draft.notes.trim() || null,
+      },
+      componentDrafts,
     });
   }
 
@@ -1671,8 +2000,8 @@ function EquipmentView({
 
   return (
     <>
-      <section className="overflow-hidden rounded-xl border bg-card shadow-sm">
-        <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center">
+      <section className="overflow-hidden rounded-lg border bg-card shadow-sm">
+        <div className="flex flex-col gap-3 border-b p-panel sm:flex-row sm:items-center">
           <div className="sm:mr-auto">
             <h2 className="text-sm font-semibold">Equipment register</h2>
             <p className="mt-0.5 text-[11px] text-muted-foreground">
@@ -1701,7 +2030,7 @@ function EquipmentView({
                 className="group bg-card p-4 text-left transition-colors hover:bg-cyan-50/50 dark:hover:bg-cyan-950/15"
               >
                 <div className="flex items-start justify-between gap-3">
-                  <span className="font-mono text-[10px] font-semibold text-cyan-700 dark:text-cyan-300">
+                  <span className="font-mono text-[11px] font-semibold text-cyan-700 dark:text-cyan-300">
                     {asset.asset_code}
                   </span>
                   <span className="flex items-center gap-2">
@@ -1719,7 +2048,7 @@ function EquipmentView({
                     .filter(Boolean)
                     .join(' · ') || 'Manufacturer not recorded'}
                 </p>
-                <dl className="mt-4 grid grid-cols-2 gap-3 border-t pt-3 text-[11px]">
+                <dl className="mt-4 grid grid-cols-3 gap-3 border-t pt-3 text-[11px]">
                   <div>
                     <dt className="text-muted-foreground">Location</dt>
                     <dd className="mt-0.5 font-medium">
@@ -1730,6 +2059,16 @@ function EquipmentView({
                     <dt className="text-muted-foreground">Next service</dt>
                     <dd className="mt-0.5 font-mono">
                       {formatSimpleDate(asset.next_service_at)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground">Components</dt>
+                    <dd className="mt-0.5 font-medium">
+                      {
+                        components.filter(
+                          (component) => component.asset_id === asset.id
+                        ).length
+                      }
                     </dd>
                   </div>
                 </dl>
@@ -1756,7 +2095,7 @@ function EquipmentView({
             role="dialog"
             aria-modal="true"
             aria-labelledby="equipment-editor-title"
-            className="h-full w-full max-w-xl overflow-y-auto border-l bg-background shadow-2xl"
+            className="h-full w-full max-w-2xl overflow-y-auto border-l bg-background shadow-2xl"
           >
             <form onSubmit={saveAsset}>
               <div className="sticky top-0 z-10 flex items-start justify-between border-b bg-background/95 px-5 py-4 backdrop-blur">
@@ -1770,6 +2109,15 @@ function EquipmentView({
                   >
                     {editingAsset ? 'Edit equipment' : 'Add equipment'}
                   </h2>
+                  <a
+                    href="#equipment-components"
+                    className="mt-1 inline-flex items-center gap-1.5 text-[11px] font-medium text-cyan-700 hover:underline dark:text-cyan-300"
+                  >
+                    <Wrench className="h-3 w-3" />
+                    {componentDrafts.length
+                      ? `${componentDrafts.length} ${componentDrafts.length === 1 ? 'component' : 'components'} · view schedules`
+                      : 'Add component schedules'}
+                  </a>
                 </div>
                 <button
                   type="button"
@@ -1781,7 +2129,15 @@ function EquipmentView({
                 </button>
               </div>
 
-              <div className="space-y-5 p-5">
+              <div className="space-y-3 p-3">
+                {scheduleError ? (
+                  <p
+                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100"
+                    role="alert"
+                  >
+                    {scheduleError}
+                  </p>
+                ) : null}
                 <EditorSection title="Asset identity">
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Asset code">
@@ -1895,7 +2251,7 @@ function EquipmentView({
                       ))}
                     </select>
                   </Field>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid gap-3 sm:grid-cols-3">
                     <Field label="Last service">
                       <Input
                         type="datetime-local"
@@ -1920,7 +2276,27 @@ function EquipmentView({
                         }
                       />
                     </Field>
+                    <Field label="Repeat every (months)">
+                      <Input
+                        min="1"
+                        step="1"
+                        type="number"
+                        value={draft.maintenanceIntervalMonths}
+                        onChange={(event) =>
+                          setDraft((value) => ({
+                            ...value,
+                            maintenanceIntervalMonths: event.target.value,
+                          }))
+                        }
+                        placeholder="12"
+                      />
+                    </Field>
                   </div>
+                  <p className="text-[11px] leading-5 text-muted-foreground">
+                    Set a next service date and repeat interval to add a
+                    maintenance alert to the calendar and lab book. Completing
+                    the alert schedules the next occurrence automatically.
+                  </p>
                   <Field label="Notes">
                     <textarea
                       value={draft.notes}
@@ -1934,9 +2310,161 @@ function EquipmentView({
                     />
                   </Field>
                 </EditorSection>
+
+                <div id="equipment-components" className="scroll-mt-24">
+                  <EditorSection title="Components & component maintenance">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-[11px] leading-5 text-muted-foreground">
+                      Track serviceable parts separately and give each one its
+                      own recurring alert.
+                    </p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        setComponentDrafts((value) => [
+                          ...value,
+                          newComponentDraft(),
+                        ])
+                      }
+                    >
+                      <Plus className="mr-1.5 h-3.5 w-3.5" /> Add component
+                    </Button>
+                  </div>
+                  {scheduleError.includes('needs both') ? (
+                    <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+                      {scheduleError}
+                    </p>
+                  ) : null}
+
+                  {componentDrafts.length ? (
+                    <div className="divide-y border-y">
+                      {componentDrafts.map((component, index) => (
+                        <div key={component.key} className="space-y-3 py-4">
+                          <div className="flex items-end gap-2">
+                            <div className="min-w-0 flex-1">
+                              <Field label={`Component ${index + 1}`}>
+                                <Input
+                                  required
+                                  value={component.name}
+                                  onChange={(event) =>
+                                    setComponentDrafts((value) =>
+                                      value.map((item) =>
+                                        item.key === component.key
+                                          ? { ...item, name: event.target.value }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                  placeholder="Turbo pump"
+                                />
+                              </Field>
+                            </div>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              title={`Remove ${component.name || `component ${index + 1}`}`}
+                              onClick={() =>
+                                setComponentDrafts((value) =>
+                                  value.filter(
+                                    (item) => item.key !== component.key
+                                  )
+                                )
+                              }
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                          <div className="grid gap-3 sm:grid-cols-3">
+                            <Field label="Last maintenance">
+                              <Input
+                                type="datetime-local"
+                                value={component.lastMaintenanceAt}
+                                onChange={(event) =>
+                                  setComponentDrafts((value) =>
+                                    value.map((item) =>
+                                      item.key === component.key
+                                        ? {
+                                            ...item,
+                                            lastMaintenanceAt: event.target.value,
+                                          }
+                                        : item
+                                    )
+                                  )
+                                }
+                              />
+                            </Field>
+                            <Field label="Next maintenance">
+                              <Input
+                                type="datetime-local"
+                                value={component.nextMaintenanceAt}
+                                onChange={(event) =>
+                                  setComponentDrafts((value) =>
+                                    value.map((item) =>
+                                      item.key === component.key
+                                        ? {
+                                            ...item,
+                                            nextMaintenanceAt: event.target.value,
+                                          }
+                                        : item
+                                    )
+                                  )
+                                }
+                              />
+                            </Field>
+                            <Field label="Repeat every (months)">
+                              <Input
+                                min="1"
+                                step="1"
+                                type="number"
+                                value={component.maintenanceIntervalMonths}
+                                onChange={(event) =>
+                                  setComponentDrafts((value) =>
+                                    value.map((item) =>
+                                      item.key === component.key
+                                        ? {
+                                            ...item,
+                                            maintenanceIntervalMonths:
+                                              event.target.value,
+                                          }
+                                        : item
+                                    )
+                                  )
+                                }
+                                placeholder="6"
+                              />
+                            </Field>
+                          </div>
+                          <Field label="Maintenance notes">
+                            <Input
+                              value={component.notes}
+                              onChange={(event) =>
+                                setComponentDrafts((value) =>
+                                  value.map((item) =>
+                                    item.key === component.key
+                                      ? { ...item, notes: event.target.value }
+                                      : item
+                                  )
+                                )
+                              }
+                              placeholder="Inspection or replacement instructions"
+                            />
+                          </Field>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="border-y py-5 text-center text-[11px] text-muted-foreground">
+                      No components recorded yet.
+                    </p>
+                  )}
+                  </EditorSection>
+                </div>
               </div>
 
-              <div className="sticky bottom-0 flex items-center gap-2 border-t bg-background/95 px-5 py-4 backdrop-blur">
+              <div className="sticky bottom-0 flex flex-wrap items-center gap-2 border-t bg-background/95 px-5 py-4 pr-16 backdrop-blur sm:flex-nowrap sm:pr-5">
                 {editingAsset ? (
                   <Button
                     type="button"
@@ -1957,7 +2485,14 @@ function EquipmentView({
                   Cancel
                 </Button>
                 <Button type="submit" disabled={saveMutation.isPending}>
-                  {saveMutation.isPending ? 'Saving…' : 'Save equipment'}
+                  {saveMutation.isPending ? (
+                    'Saving…'
+                  ) : (
+                    <>
+                      <span className="sm:hidden">Save</span>
+                      <span className="hidden sm:inline">Save equipment</span>
+                    </>
+                  )}
                 </Button>
               </div>
             </form>
@@ -1970,8 +2505,8 @@ function EquipmentView({
 
 function BackupsView({ backups }: { backups: BackupRecord[] }) {
   return (
-    <section className="overflow-hidden rounded-xl border bg-card shadow-sm">
-      <div className="border-b px-4 py-3">
+    <section className="overflow-hidden rounded-lg border bg-card shadow-sm">
+      <div className="border-b p-panel">
         <h2 className="text-sm font-semibold">Backup register</h2>
         <p className="mt-0.5 text-[11px] text-muted-foreground">
           Database, document, configuration, and instrument backup evidence.
@@ -1998,7 +2533,7 @@ function BackupsView({ backups }: { backups: BackupRecord[] }) {
                 <StatusPill tone={statusTone(backup.status)}>
                   {backup.status}
                 </StatusPill>
-                <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+                <p className="mt-1 font-mono text-[11px] text-muted-foreground">
                   {formatSimpleDate(backup.started_at)}
                 </p>
               </div>

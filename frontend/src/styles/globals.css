@@ -4,31 +4,39 @@
 
 @layer base {
   :root {
-    --background: 216 38% 97%;
-    --foreground: 216 44% 14%;
-    --card: 0 0% 100%;
-    --card-foreground: 0 0% 9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 9%;
-    --primary: 216 72% 44%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 0 0% 96%;
-    --secondary-foreground: 0 0% 15%;
-    --muted: 0 0% 96%;
-    --muted-foreground: 0 0% 45%;
-    --accent: 214 45% 94%;
-    --accent-foreground: 216 58% 32%;
+    --background: 230.00 50.00% 97.65%;
+    --foreground: 233.57 43.75% 12.55%;
+    --card: 0.00 0.00% 100.00%;
+    --card-foreground: 233.57 43.75% 12.55%;
+    --popover: 0.00 0.00% 100.00%;
+    --popover-foreground: 233.57 43.75% 12.55%;
+    --primary: 248.34 59.22% 50.00%;
+    --primary-foreground: 0.00 0.00% 100.00%;
+    --secondary: 226.67 47.37% 96.27%;
+    --secondary-foreground: 233.57 43.75% 12.55%;
+    --muted: 226.67 47.37% 96.27%;
+    --muted-foreground: 223.04 18.11% 50.20%;
+    --accent: 232.00 100.00% 97.06%;
+    --accent-foreground: 248.34 59.22% 50.00%;
+    --border: 225.00 44.44% 89.41%;
+    --input: 225.00 44.44% 89.41%;
+    --ring: 263.06 100.00% 50.00%;
+    --success: 171.80 100.00% 27.25%;
+    --special: 263.06 100.00% 50.00%;
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --border: 214 30% 89%;
-    --input: 214 32% 82%;
-    --ring: 214 64% 58%;
-    --success: 167 81% 31%;
     --warning: 35 74% 49%;
     --info: 191 74% 35%;
-    --special: 255 39% 53%;
-    --radius: 0.5rem;
-    --app-header-height: 104px;
+    --radius: 6px;
+    --chart-grid: #E5EAF4;
+    --success-background: #EAF8F1;
+    --app-sidebar-width: 216px;
+    --app-header-height: 68px;
+    --workspace-padding: 16px;
+    --panel-gap: 10px;
+    --panel-padding: 14px;
+    --control-height: 34px;
+    --table-row-height: 32px;
   }
 
   .dark {
@@ -38,19 +46,19 @@
     --card-foreground: 210 40% 96%;
     --popover: 222 47% 8%;
     --popover-foreground: 210 40% 96%;
-    --primary: 213 82% 60%;
+    --primary: 250 90% 76%;
     --primary-foreground: 0 0% 100%;
     --secondary: 217 33% 17%;
     --secondary-foreground: 210 40% 96%;
     --muted: 217 33% 17%;
     --muted-foreground: 215 20% 65%;
-    --accent: 216 41% 22%;
+    --accent: 248 35% 22%;
     --accent-foreground: 210 40% 96%;
     --destructive: 0 63% 42%;
     --destructive-foreground: 210 40% 98%;
     --border: 216 34% 20%;
     --input: 215 25% 27%;
-    --ring: 213 82% 60%;
+    --ring: 263 100% 78%;
     --success: 160 69% 42%;
     --warning: 38 92% 50%;
     --info: 189 85% 45%;
@@ -73,7 +81,8 @@
   body {
     @apply min-h-screen bg-background text-foreground antialiased;
     font-family: var(--font-body), 'Segoe UI', sans-serif;
-    font-size: 14px;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
   }
 
   .dark body {
@@ -85,7 +94,7 @@
   h2,
   h3,
   .font-display {
-    font-family: var(--font-display), 'Segoe UI', sans-serif;
+    font-family: var(--font-body), 'Segoe UI', sans-serif;
   }
 
   code,
@@ -97,6 +106,24 @@
 
   ::selection {
     background: hsl(var(--primary) / 0.18);
+  }
+
+  .markdown-response .katex {
+    color: inherit;
+    font-size: 1.02em;
+  }
+
+  .markdown-response .katex-display {
+    margin: 0.9rem 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.15rem 0 0.35rem;
+    text-align: center;
+  }
+
+  .markdown-response .katex-display > .katex {
+    min-width: max-content;
+    text-align: center;
   }
 
   :focus-visible {
@@ -122,7 +149,7 @@
     input,
     select,
     textarea {
-      font-size: 12px;
+      font-size: 13px;
     }
   }
 
@@ -134,6 +161,77 @@
       animation-duration: 0.01ms !important;
       animation-iteration-count: 1 !important;
       transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .workspace-main {
+    width: auto;
+    min-width: 0;
+    padding: calc(var(--app-header-height) + var(--panel-gap)) var(--workspace-padding) var(--workspace-padding);
+  }
+
+  .workspace-panel {
+    min-width: 0;
+  }
+
+  .workspace-panel-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--panel-gap);
+    padding: 8px var(--panel-padding);
+  }
+
+  .workspace-table {
+    max-height: min(680px, 65dvh);
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .workspace-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: hsl(var(--muted));
+    box-shadow: 0 1px 0 hsl(var(--border));
+  }
+
+  .workspace-table td {
+    height: var(--table-row-height);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .workspace-main :where(.grid > *, section, form) {
+    min-width: 0;
+  }
+
+  .workspace-main :where(input:not([type='checkbox']):not([type='radio']), select, textarea) {
+    max-width: 100%;
+  }
+
+  .workspace-main :where([role='tablist']) {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .workspace-main :where([role='tab']) {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  @media (max-width: 639px) {
+    :root { --workspace-padding: 12px; }
+    .workspace-main :where(input:not([type='checkbox']):not([type='radio']), select, textarea) {
+      font-size: 16px;
+    }
+  }
+
+  @media (pointer: coarse) {
+    .workspace-main :where(button, select, input:not([type='checkbox']):not([type='radio'])) {
+      min-height: 36px;
     }
   }
 }

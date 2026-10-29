@@ -1,3 +1,5 @@
+import { readUploadForm } from '@/lib/cloud/upload-form';
+import { persistKnowledgeFile } from '@/lib/cloud/knowledge-files';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -36,7 +38,7 @@ function safeFileName(value: string) {
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
+    const formData = await readUploadForm(request);
     const files = formData
       .getAll('files')
       .filter(
@@ -113,6 +115,7 @@ export async function POST(request: Request) {
         suffix += 1;
       }
       await fs.writeFile(destination, Buffer.from(await file.arrayBuffer()));
+      await persistKnowledgeFile(destination);
       stored.push({ name: fileName, bytes: file.size });
     }
 

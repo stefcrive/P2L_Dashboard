@@ -5,10 +5,11 @@ import { NextResponse } from 'next/server';
 
 import { resolveClientiRootPath } from '@/lib/client-manager/paths';
 import { getSupabaseAdminClient } from '@/lib/supabase/admin';
+import { readCloudDocument } from '@/lib/cloud/files';
 
 export const runtime = 'nodejs';
 
-type RouteContext = { params: { id: string } };
+type RouteContext = { params: Promise<{ id: string }> };
 
 function decodeBytea(value: unknown): Uint8Array | null {
   if (value instanceof Uint8Array) return value;
@@ -21,7 +22,8 @@ function decodeBytea(value: unknown): Uint8Array | null {
   return null;
 }
 
-export async function GET(_request: Request, { params }: RouteContext) {
+export async function GET(_request: Request, { params: paramsPromise }: RouteContext) {
+  const params = await paramsPromise;
   const database = getSupabaseAdminClient();
   const { data, error } = await database
     .from('client_documents')
@@ -33,6 +35,9 @@ export async function GET(_request: Request, { params }: RouteContext) {
   }
 
   let bytes = decodeBytea(data.content);
+  if (!bytes && data.absolute_path?.startsWith('blob://')) {
+    bytes = await readCloudDocument(data.absolute_path);
+  }
   if (!bytes && typeof data.absolute_path === 'string') {
     const clientiRoot = path.resolve(await resolveClientiRootPath());
     const candidate = path.resolve(data.absolute_path);
@@ -58,4 +63,56 @@ export async function GET(_request: Request, { params }: RouteContext) {
       'Cache-Control': 'private, max-age=300',
     },
   });
+}
+
+export async function DELETE(_request: Request, { params: paramsPromise }: RouteContext) {
+  const params = await paramsPromise;
+  try {
+    const database = getSupabaseAdminClient();
+    const { data: document, error: readError } = await database
+      .from('client_documents')
+      .select('id, client_id, file_name, storage_origin')
+      .eq('id', params.id)
+      .maybeSingle();
+    if (readError) throw new Error(readError.message);
+    if (!document) {
+      return NextResponse.json({ error: 'Document not found.' }, { status: 404 });
+    }
+    if (document.storage_origin !== 'upload') {
+      return NextResponse.json(
+        {
+          error:
+            'Indexed folder files cannot be removed here. Remove the source file and run sync instead.',
+        },
+        { status: 409 }
+      );
+    }
+
+    const { error: deleteError } = await database
+      .from('client_documents')
+      .delete()
+      .eq('id', params.id);
+    if (deleteError) throw new Error(deleteError.message);
+
+    const { count } = await database
+      .from('client_documents')
+      .select('id', { count: 'exact', head: true })
+      .eq('client_id', document.client_id);
+    await database
+      .from('clients')
+      .update({ total_documents: count ?? 0 })
+      .eq('id', document.client_id);
+
+    return NextResponse.json({
+      message: `${String(document.file_name)} removed.`,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error ? error.message : 'Unable to remove document.',
+      },
+      { status: 500 }
+    );
+  }
 }

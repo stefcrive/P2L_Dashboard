@@ -18,7 +18,7 @@ export function SettingsNavigation() {
   return (
     <nav
       aria-label="Settings sections"
-      className="mb-5 flex w-full gap-1 overflow-x-auto rounded-lg border bg-muted/35 p-1 sm:w-fit"
+      className="mb-3 flex w-full gap-1 overflow-x-auto rounded-lg border bg-muted/35 p-1 sm:w-fit"
     >
       {items.map((item) => {
         const active =
@@ -33,7 +33,7 @@ export function SettingsNavigation() {
             aria-current={active ? 'page' : undefined}
             className={cn(
               'flex h-9 shrink-0 items-center gap-2 rounded-md px-3 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-              active && 'bg-background text-foreground shadow-sm'
+              active && 'bg-primary text-primary-foreground hover:text-primary-foreground'
             )}
           >
             <Icon className="h-3.5 w-3.5" aria-hidden="true" />

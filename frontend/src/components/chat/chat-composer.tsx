@@ -55,12 +55,16 @@ export function ChatComposer({
   onSend,
   pending,
   compact = false,
+  initialValue = '',
+  placeholder = 'Ask about operations, attach a file, or use /knowledge…',
 }: {
   onSend: (message: string, files: File[]) => void | Promise<void>;
   pending: boolean;
   compact?: boolean;
+  initialValue?: string;
+  placeholder?: string;
 }) {
-  const [value, setValue] = useState('');
+  const [value, setValue] = useState(initialValue);
   const [files, setFiles] = useState<File[]>([]);
   const [attachmentError, setAttachmentError] = useState('');
   const [dragActive, setDragActive] = useState(false);
@@ -132,7 +136,7 @@ export function ChatComposer({
       className={cn(
         'relative',
         dragActive &&
-          'after:pointer-events-none after:absolute after:inset-1 after:rounded-xl after:border-2 after:border-dashed after:border-sky-500 after:bg-sky-50/80 after:content-["Drop_files_here"] after:grid after:place-items-center after:text-xs after:font-semibold after:text-sky-700 after:backdrop-blur-sm dark:after:bg-sky-950/80 dark:after:text-sky-200'
+          'after:pointer-events-none after:absolute after:inset-1 after:rounded-lg after:border-2 after:border-dashed after:border-sky-500 after:bg-sky-50/80 after:content-["Drop_files_here"] after:grid after:place-items-center after:text-xs after:font-semibold after:text-sky-700 after:backdrop-blur-sm dark:after:bg-sky-950/80 dark:after:text-sky-200'
       )}
       onDragEnter={(event) => {
         event.preventDefault();
@@ -196,7 +200,7 @@ export function ChatComposer({
           aria-label="Attach images or files"
           title="Attach images or files"
           className={cn(
-            'grid shrink-0 place-items-center rounded-lg border border-slate-200 text-slate-500 shadow-sm hover:border-sky-300 hover:bg-sky-50 hover:text-sky-600 disabled:cursor-not-allowed disabled:opacity-45 dark:border-slate-700 dark:text-slate-400 dark:hover:border-sky-800 dark:hover:bg-sky-950/40 dark:hover:text-sky-400',
+            'grid shrink-0 place-items-center rounded-lg border border-slate-200 text-sky-700 shadow-sm hover:border-sky-300 hover:bg-sky-50 hover:text-sky-800 disabled:cursor-not-allowed disabled:opacity-45 dark:border-slate-700 dark:text-sky-300 dark:hover:border-sky-800 dark:hover:bg-sky-950/40 dark:hover:text-sky-200',
             compact ? 'h-9 w-9' : 'h-10 w-10'
           )}
         >
@@ -215,10 +219,10 @@ export function ChatComposer({
             )}px`;
           }}
           onKeyDown={onKeyDown}
-          placeholder="Ask about operations, attach a file, or use /knowledge…"
+          placeholder={placeholder}
           aria-label="Message the assistant"
           className={cn(
-            'min-h-9 flex-1 resize-none rounded-xl border border-slate-300 bg-white px-3 py-2 text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/15 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-500',
+            'min-h-9 flex-1 resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/15 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:placeholder:text-slate-500',
             compact ? 'max-h-28 text-[13px]' : 'max-h-40 text-sm'
           )}
         />

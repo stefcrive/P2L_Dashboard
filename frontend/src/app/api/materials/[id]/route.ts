@@ -5,7 +5,7 @@ import { getSupabaseAdminClient } from '@/lib/supabase/admin';
 
 export const runtime = 'nodejs';
 
-type RouteContext = { params: { id: string } };
+type RouteContext = { params: Promise<{ id: string }> };
 
 const AVAILABILITY = [
   'available',
@@ -25,7 +25,8 @@ function numberOrNull(value: unknown): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-export async function PATCH(request: Request, { params }: RouteContext) {
+export async function PATCH(request: Request, { params: paramsPromise }: RouteContext) {
+  const params = await paramsPromise;
   const body = (await request.json().catch(() => null)) as
     | Record<string, unknown>
     | null;
@@ -111,7 +112,8 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   });
 }
 
-export async function DELETE(_request: Request, { params }: RouteContext) {
+export async function DELETE(_request: Request, { params: paramsPromise }: RouteContext) {
+  const params = await paramsPromise;
   const database = getSupabaseAdminClient();
   const { data: material, error: readError } = await database
     .from('materials_inventory')

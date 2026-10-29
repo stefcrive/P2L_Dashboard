@@ -12,10 +12,16 @@ import {
 
 export const dynamic = 'force-dynamic';
 
+const maintenanceProjectionWritable = new Set([
+  'status',
+  'occurred_at',
+  'next_due_at',
+]);
+
 type RouteContext = {
-  params: {
+  params: Promise<{
     resource: string;
-  };
+  }>;
 };
 
 function invalidResource() {
@@ -35,7 +41,8 @@ function unavailableResponse() {
   );
 }
 
-export async function GET(_request: Request, { params }: RouteContext) {
+export async function GET(_request: Request, { params: paramsPromise }: RouteContext) {
+  const params = await paramsPromise;
   if (!isResourceName(params.resource)) return invalidResource();
 
   try {
@@ -61,7 +68,8 @@ export async function GET(_request: Request, { params }: RouteContext) {
   }
 }
 
-export async function POST(request: Request, { params }: RouteContext) {
+export async function POST(request: Request, { params: paramsPromise }: RouteContext) {
+  const params = await paramsPromise;
   if (!isResourceName(params.resource)) return invalidResource();
   const config = resourceConfigs[params.resource];
   if (config.readOnly) {
@@ -99,7 +107,8 @@ export async function POST(request: Request, { params }: RouteContext) {
   }
 }
 
-export async function PATCH(request: Request, { params }: RouteContext) {
+export async function PATCH(request: Request, { params: paramsPromise }: RouteContext) {
+  const params = await paramsPromise;
   if (!isResourceName(params.resource)) return invalidResource();
   const config = resourceConfigs[params.resource];
   if (config.readOnly) {
@@ -119,12 +128,35 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       );
     }
 
+    const supabase = getSupabaseAdminClient();
+    const requestPayload = (await request.json()) as Record<string, unknown>;
+    if (params.resource === 'lab-book') {
+      const { data: existing, error: existingError } = await (
+        supabase.from('lab_book_entries') as any
+      )
+        .select('source_key')
+        .eq('id', id)
+        .maybeSingle();
+      if (existingError) throw existingError;
+      if (existing?.source_key?.startsWith('maintenance:')) {
+        for (const key of Object.keys(requestPayload)) {
+          if (!maintenanceProjectionWritable.has(key)) {
+            return NextResponse.json(
+              {
+                error:
+                  'This maintenance alert is owned by its equipment schedule. Manage identity and recurrence from Equipment.',
+              },
+              { status: 409 }
+            );
+          }
+        }
+      }
+    }
     const payload = sanitizeResourcePayload(
       params.resource,
-      await request.json(),
+      requestPayload,
       false
     );
-    const supabase = getSupabaseAdminClient();
     const table = supabase.from(config.table) as any;
     const { data, error } = await table
       .update(payload)
@@ -145,7 +177,8 @@ export async function PATCH(request: Request, { params }: RouteContext) {
   }
 }
 
-export async function DELETE(request: Request, { params }: RouteContext) {
+export async function DELETE(request: Request, { params: paramsPromise }: RouteContext) {
+  const params = await paramsPromise;
   if (!isResourceName(params.resource)) return invalidResource();
   const config = resourceConfigs[params.resource];
   if (config.readOnly) {
@@ -165,6 +198,24 @@ export async function DELETE(request: Request, { params }: RouteContext) {
     }
 
     const supabase = getSupabaseAdminClient();
+    if (params.resource === 'lab-book') {
+      const { data: existing, error: existingError } = await (
+        supabase.from('lab_book_entries') as any
+      )
+        .select('source_key')
+        .eq('id', id)
+        .maybeSingle();
+      if (existingError) throw existingError;
+      if (existing?.source_key?.startsWith('maintenance:')) {
+        return NextResponse.json(
+          {
+            error:
+              'This maintenance alert is owned by its equipment schedule. Clear or change the schedule from Equipment.',
+          },
+          { status: 409 }
+        );
+      }
+    }
     const table = supabase.from(config.table) as any;
     const { error } = await table.delete().eq('id', id);
     if (error) throw error;

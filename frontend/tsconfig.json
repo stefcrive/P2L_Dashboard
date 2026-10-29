@@ -33,14 +33,17 @@
     }
   },
   "include": [
-    "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
-    ".next/types/**/*.ts",
-    ".next-verify/types/**/*.ts",
-    ".next-labbook/types/**/*.ts"
+    "next-env.d.ts",
+    ".next-presentation/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    ".next",
+    ".next-labbook",
+    ".next-labbook-2",
+    ".next-labbook-3",
+    ".next-labbook-4"
   ]
 }

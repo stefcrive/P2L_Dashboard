@@ -6,7 +6,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  Beaker,
+  ListOrdered,
   BookOpenCheck,
   Boxes,
   Building2,
@@ -20,11 +20,13 @@ import {
 
 import { cn } from '@/lib/utils';
 import { ThemeToggle } from './theme-toggle';
+import { EvoStudioBrand, P2LLogo } from './brand-logos';
 
 const navigation = [
   { href: '/', label: 'Overview', icon: LayoutDashboard },
   { href: '/clients', label: 'Clients', icon: Users },
   { href: '/results', label: 'Results', icon: FlaskConical },
+  { href: '/queue', label: 'Queue', icon: ListOrdered },
   { href: '/materials', label: 'Inventory', icon: Boxes },
   { href: '/providers', label: 'Providers', icon: Building2 },
   { href: '/lab-book', label: 'Lab book', icon: BookOpenCheck },
@@ -34,7 +36,7 @@ const navigation = [
 ] as const;
 
 type HeaderSummary = {
-  source: 'local' | 'supabase' | 'unavailable';
+  source: 'local' | 'supabase' | 'neon' | 'unavailable';
   pendingResults: number;
   maintenanceDue: number;
   lastBackupAt: string | null;
@@ -42,7 +44,7 @@ type HeaderSummary = {
 
 type DatabaseReadiness = {
   ready: true;
-  source: 'local' | 'supabase';
+  source: 'local' | 'supabase' | 'neon';
 };
 
 async function fetchDatabaseReadiness(): Promise<DatabaseReadiness> {
@@ -73,12 +75,13 @@ function formatBackupAge(value: string | null | undefined) {
   return `${Math.round(hours / 24)}d ago`;
 }
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({ children, requireAuth = false }: { children: React.ReactNode; requireAuth?: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
   const headerRef = useRef<HTMLElement>(null);
   const [now, setNow] = useState<Date | null>(null);
   const readinessQuery = useQuery({
+    enabled: pathname !== '/login',
     queryKey: ['database-readiness'],
     queryFn: fetchDatabaseReadiness,
     refetchInterval: 60_000,
@@ -86,6 +89,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 8_000),
   });
   const summaryQuery = useQuery({
+    enabled: pathname !== '/login',
     queryKey: ['operations-header-summary'],
     queryFn: fetchHeaderSummary,
     refetchInterval: 60_000,
@@ -120,162 +124,59 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const observer = new ResizeObserver(updateHeight);
     observer.observe(header);
     return () => observer.disconnect();
-  }, []);
+  }, [pathname]);
 
   const summary = summaryQuery.data;
   const databaseReady = readinessQuery.data?.ready === true;
   const databaseStarting = readinessQuery.isPending || readinessQuery.isFetching;
 
+  if (pathname === '/login') return <>{children}</>;
+
   return (
     <div className="min-h-screen overflow-x-clip">
-      <header
-        ref={headerRef}
-        className="fixed inset-x-0 top-0 z-50 border-b bg-white/95 shadow-sm backdrop-blur dark:bg-slate-950/95"
-      >
-        <div className="flex min-h-14 w-full items-center gap-3 px-3 md:px-4 lg:px-6">
-          <Link
-            href="/"
-            className="flex shrink-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <span className="grid h-8 w-8 place-items-center rounded-md border border-primary/30 bg-primary/10 text-primary">
-              <Beaker className="h-4 w-4" aria-hidden="true" />
-            </span>
-            <span className="hidden leading-none sm:block">
-              <span className="block font-display text-sm font-semibold">
-                P2L
-              </span>
-              <span className="mt-1 block font-mono text-[9px] uppercase tracking-[0.06em] text-muted-foreground">
-                Laboratory OS
-              </span>
-            </span>
+      <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded-md focus:bg-primary focus:px-4 focus:py-2 focus:text-white">Skip to workspace</a>
+      <header ref={headerRef} className="fixed inset-x-0 top-0 z-50 border-b bg-card">
+        <div className="flex min-h-[68px] w-full items-center gap-3 px-4">
+          <Link href="/" aria-label="P2L laboratory workspace home" className="flex shrink-0 items-center gap-2.5 rounded-md lg:w-[184px]">
+            <P2LLogo />
+            <span className="hidden leading-none sm:block"><span className="block text-sm font-semibold">P2L</span><span className="mt-1 block text-xs text-muted-foreground">Laboratory workspace</span></span>
           </Link>
-
-          <nav
-            className="ml-2 hidden flex-1 items-center gap-1 xl:flex"
-            aria-label="Primary"
-          >
-            {navigation.map((item) => {
-              const active =
-                item.href === '/'
-                  ? pathname === '/'
-                  : pathname.startsWith(item.href);
-              const Icon = item.icon;
-              return (
-                  <Link
-                  key={item.href}
-                  href={item.href as Route}
-                  aria-current={active ? 'page' : undefined}
-                  className={cn(
-                    'flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground',
-                    active &&
-                      'bg-blue-50 text-primary shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.18)] dark:bg-blue-950/50'
-                  )}
-                >
-                  <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-                  {item.label}
-                </Link>
-              );
-            })}
-          </nav>
-
-          <label className="relative ml-auto flex-1 xl:hidden">
+          <div className="hidden items-center gap-2 border-l pl-4 text-sm lg:flex"><span className="text-muted-foreground">Workspace</span><span className="text-border">/</span><strong className="font-medium">{currentItem.label}</strong></div>
+          <label className="min-w-0 flex-1 lg:hidden">
             <span className="sr-only">Current section</span>
-            <select
-              value={currentItem.href}
-              onChange={(event) => router.push(event.target.value as Route)}
-              className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs font-medium sm:max-w-56"
-            >
-              {navigation.map((item) => (
-                <option key={item.href} value={item.href}>
-                  {item.label}
-                </option>
-              ))}
+            <select value={currentItem.href} onChange={(event) => router.push(event.target.value as Route)} className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm sm:max-w-56">
+              {navigation.map((item) => <option key={item.href} value={item.href}>{item.label}</option>)}
             </select>
           </label>
-
-          <div className="ml-auto flex items-center gap-1 xl:ml-0">
-            <span
-              className={cn(
-                'hidden items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[10px] lg:flex',
-                databaseReady
-                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-200'
-                  : databaseStarting
-                    ? 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200'
-                  : 'border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200'
-              )}
-            >
-              <span
-                className={cn(
-                  'h-1.5 w-1.5 rounded-full',
-                  databaseReady
-                    ? 'bg-emerald-500'
-                    : databaseStarting
-                      ? 'animate-pulse bg-amber-500'
-                      : 'bg-rose-500'
-                )}
-                aria-hidden="true"
-              />
-              {databaseReady
-                ? readinessQuery.data?.source === 'supabase'
-                  ? 'Supabase DB'
-                  : 'Local DB'
-                : databaseStarting
-                  ? 'DB starting'
-                  : 'DB offline'}
+          <div className="ml-auto flex items-center gap-3">
+            <EvoStudioBrand compact />
+            <span className="hidden whitespace-nowrap font-mono text-xs text-muted-foreground xl:block">{now ? new Intl.DateTimeFormat('en-GB', {dateStyle: 'medium', timeStyle: 'short'}).format(now) : '—'}</span>
+            <span className={cn('hidden items-center gap-1.5 rounded-md border px-2 py-1 text-xs sm:flex', databaseReady ? 'border-success/20 bg-success/5 text-success' : 'border-warning/20 bg-warning/5 text-warning')}>
+              <span className={cn('h-1.5 w-1.5 rounded-full', databaseReady ? 'bg-success' : 'bg-warning')} aria-hidden="true" />
+              {databaseReady ? 'Connected' : databaseStarting ? 'Connecting' : 'Connection unavailable'}
             </span>
             <ThemeToggle />
-          </div>
-        </div>
-
-        <div className="border-t bg-slate-50/90 dark:bg-slate-900/85">
-          <div className="flex min-h-9 w-full items-center gap-3 px-3 font-mono text-[10px] text-muted-foreground md:px-4 lg:px-6">
-            <span className="whitespace-nowrap tabular-nums">
-              {now
-                ? new Intl.DateTimeFormat('en-GB', {
-                    dateStyle: 'medium',
-                    timeStyle: 'short',
-                  }).format(now)
-                : '—'}
-            </span>
-            <span className="hidden text-border sm:inline">/</span>
-            <span className="hidden truncate sm:inline">
-              P2L · IRMS laboratory
-            </span>
-            <div className="ml-auto flex items-center gap-3">
-              <span className="hidden whitespace-nowrap md:inline">
-                Results queue{' '}
-                <strong className="font-semibold text-foreground tabular-nums">
-                  {summary?.pendingResults ?? '—'}
-                </strong>
-              </span>
-              <span className="hidden whitespace-nowrap md:inline">
-                Maintenance due{' '}
-                <strong
-                  className={cn(
-                    'font-semibold tabular-nums',
-                    summary?.maintenanceDue ? 'text-warning' : 'text-foreground'
-                  )}
-                >
-                  {summary?.maintenanceDue ?? '—'}
-                </strong>
-              </span>
-              <span className="whitespace-nowrap">
-                Last backup{' '}
-                <strong className="font-semibold text-foreground">
-                  {formatBackupAge(summary?.lastBackupAt)}
-                </strong>
-              </span>
-            </div>
+            {requireAuth && <button type="button" className="h-8 rounded-md border bg-card px-2 text-xs hover:bg-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary" onClick={async () => { const response = await fetch('/api/auth/logout', { method: 'POST' }); if (response.ok) window.location.assign('/login'); }}>Sign out</button>}
           </div>
         </div>
       </header>
-
-      <main
-        id="main-content"
-        className="w-full px-3 pb-10 pt-[calc(var(--app-header-height)+20px)] md:px-4 lg:px-6"
-      >
-        {children}
-      </main>
+      <aside className="fixed bottom-0 left-0 top-[var(--app-header-height)] hidden w-[216px] flex-col border-r bg-card p-3 lg:flex">
+        <p className="px-2 pb-3 pt-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Laboratory operations</p>
+        <nav className="grid gap-1" aria-label="Primary">
+          {navigation.map((item) => {
+            const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
+            const Icon = item.icon;
+            return <Link key={item.href} href={item.href as Route} aria-current={active ? 'page' : undefined} className={cn('flex min-h-9 items-center gap-2.5 rounded-md border border-transparent px-2.5 text-[13px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground', active && 'border-primary/20 bg-accent text-primary hover:text-primary')}><Icon className="h-[18px] w-[18px]" strokeWidth={1.6} aria-hidden="true" />{item.label}</Link>;
+          })}
+        </nav>
+        <div className="mt-auto space-y-3 border-t px-2 pt-4 text-xs">
+          <div className="flex items-center justify-between text-muted-foreground"><span>Results queue</span><strong className="font-mono font-medium text-foreground">{summary?.pendingResults ?? '—'}</strong></div>
+          <div className="flex items-center justify-between text-muted-foreground"><span>Maintenance due</span><strong className={cn('font-mono font-medium', summary?.maintenanceDue ? 'text-warning' : 'text-foreground')}>{summary?.maintenanceDue ?? '—'}</strong></div>
+          <div className="flex items-center justify-between text-muted-foreground"><span>Last backup</span><strong className="font-mono font-medium text-foreground">{formatBackupAge(summary?.lastBackupAt)}</strong></div>
+          <p className="border-t pt-3 text-muted-foreground">P2L · IRMS laboratory</p>
+        </div>
+      </aside>
+      <main id="main-content" className="workspace-main min-w-0 px-3 pb-10 pt-[calc(var(--app-header-height)+16px)] sm:px-4 lg:ml-[216px]">{children}</main>
     </div>
   );
 }

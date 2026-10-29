@@ -1,4 +1,6 @@
 'use client';
+import { postUploadForm } from '@/lib/cloud/upload-client';
+
 
 import {
   Activity,
@@ -16,10 +18,10 @@ import {
   Pause,
   Play,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   Sparkles,
-  Square,
   Trash2,
   UploadCloud,
   X,
@@ -41,6 +43,8 @@ import {
 } from '@/components/dashboard/primitives';
 import { MarkdownResponse } from '@/components/chat/markdown-response';
 import { KnowledgeReviewQueue } from '@/components/knowledge/knowledge-review-queue';
+import { KnowledgeEngineChat } from '@/components/knowledge/knowledge-engine-chat';
+import { KnowledgeEnginesManager } from '@/components/knowledge/knowledge-engines-manager';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -53,7 +57,7 @@ import {
 } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
 
-type Tab = 'ask' | 'processing' | 'review' | 'library';
+type Tab = 'chat' | 'ask' | 'processing' | 'review' | 'engines' | 'library';
 type IngestionMode = 'parse_only' | 'indexed' | 'enriched';
 
 interface Job {
@@ -68,6 +72,9 @@ interface Job {
   stage: string;
   mode: IngestionMode;
   source_path: string;
+  engine_id: string | null;
+  engine_name: string | null;
+  technical_review_enabled: boolean;
   enrichment_model: string | null;
   embedding_model: string | null;
   total_files: number;
@@ -84,6 +91,8 @@ interface Job {
   finished_at: string | null;
   chunk_target_tokens: number;
   chunk_overlap_tokens: number;
+  review_count: number;
+  pending_review_count: number;
   files: JobFile[];
 }
 
@@ -91,6 +100,7 @@ interface JobFile {
   id: string;
   job_id: string;
   source_name: string;
+  byte_size: number;
   status: string;
   stage: string;
   message_count: number;
@@ -131,6 +141,12 @@ interface Overview {
   };
   jobs: Job[];
   sources: Source[];
+  engines: Array<{
+    id: string;
+    name: string;
+    enabled: boolean;
+    system_key: string | null;
+  }>;
   defaults: {
     sourcePath: string;
     enrichmentModel: string;
@@ -174,18 +190,19 @@ interface AnswerResult {
 }
 
 const selectClass =
-  'h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25';
-const stageOrder = ['parse', 'clean', 'enrich', 'embed', 'index'];
-const stageLabels: Record<string, string> = {
-  parse: 'Extract',
-  clean: 'Clean',
-  enrich: 'Enrich',
-  embed: 'Embed',
-  index: 'Index',
-};
+  'h-control w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25';
+const compactJobSelectClass =
+  'h-7 min-w-0 rounded border border-input bg-background px-2 text-[11px] shadow-sm focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25 disabled:cursor-not-allowed disabled:opacity-50';
 
 function number(value: number | undefined) {
   return new Intl.NumberFormat('en-GB').format(Number(value ?? 0));
+}
+
+function compactNumber(value: number) {
+  return new Intl.NumberFormat('en-US', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(value);
 }
 
 function bytes(value: number) {
@@ -195,6 +212,7 @@ function bytes(value: number) {
 }
 
 function money(value: number) {
+  if (value <= 0) return '$0.00';
   if (value < 0.01) return `<$0.01`;
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
@@ -205,6 +223,13 @@ function money(value: number) {
 
 function approximateTokens(files: File[]) {
   return Math.ceil(files.reduce((total, file) => total + file.size, 0) / 4);
+}
+
+function approximateJobTokens(job: Job) {
+  return Math.ceil(
+    job.files.reduce((total, file) => total + Number(file.byte_size ?? 0), 0) /
+      4
+  );
 }
 
 function embeddingCost(
@@ -218,27 +243,23 @@ function embeddingCost(
   return ((tokens * overlapFactor) / 1_000_000) * rate;
 }
 
-function groupedJobs(jobs: Job[]) {
-  const groups = new Map<string, { job: Job; repeated: number }>();
-  for (const job of jobs) {
-    const key = [
-      job.source_path,
-      job.mode,
-      job.enrichment_model ?? '',
-      job.embedding_model ?? '',
-      job.chunk_target_tokens,
-      job.chunk_overlap_tokens,
-    ].join('::');
-    const current = groups.get(key);
-    if (current) current.repeated += 1;
-    else groups.set(key, { job, repeated: 1 });
-  }
-  return Array.from(groups.values());
+function enrichmentCost(tokens: number, model: string) {
+  const rates: Record<string, { input: number; output: number }> = {
+    'gpt-5.6-luna': { input: 0.2, output: 1.2 },
+    'gpt-5.6-terra': { input: 2, output: 12 },
+    'gpt-5.6-sol': { input: 5, output: 30 },
+  };
+  const rate = rates[model] ?? rates['gpt-5.6-luna'];
+  const expectedOutputTokens = tokens * 0.1;
+  return (
+    (tokens / 1_000_000) * rate.input +
+    (expectedOutputTokens / 1_000_000) * rate.output
+  );
 }
 
-function compactPath(value: string) {
+function fileName(value: string) {
   const parts = value.split('\\').join('/').split('/');
-  return parts.length > 3 ? `…/${parts.slice(-3).join('/')}` : value;
+  return parts.at(-1) || value;
 }
 
 function statusTone(status: string) {
@@ -248,49 +269,6 @@ function statusTone(status: string) {
   if (['warning', 'paused'].includes(status)) return 'warning' as const;
   if (['failed', 'cancelled'].includes(status)) return 'danger' as const;
   return 'neutral' as const;
-}
-
-function ProvenanceRail({ job }: { job: Job }) {
-  const current =
-    job.stage === 'complete'
-      ? stageOrder.length
-      : stageOrder.indexOf(job.stage);
-  return (
-    <div
-      className="grid grid-cols-5 gap-1"
-      aria-label={`Current stage: ${job.stage}`}
-    >
-      {stageOrder.map((stage, index) => {
-        const skipped =
-          (job.mode === 'parse_only' && ['enrich', 'embed'].includes(stage)) ||
-          (job.mode === 'indexed' && stage === 'enrich');
-        const complete = job.status === 'completed' || index < current;
-        const active =
-          !skipped && index === current && job.status === 'running';
-        return (
-          <div key={stage} className="min-w-0">
-            <div
-              className={cn(
-                'h-1.5 rounded-full bg-slate-200 dark:bg-slate-800',
-                complete && !skipped && 'bg-emerald-500 dark:bg-emerald-500',
-                active && 'animate-pulse bg-blue-500',
-                skipped && 'bg-slate-100 dark:bg-slate-900'
-              )}
-            />
-            <p
-              className={cn(
-                'mt-1 truncate font-mono text-[9px] uppercase text-muted-foreground',
-                active && 'text-primary',
-                skipped && 'line-through opacity-50'
-              )}
-            >
-              {stageLabels[stage]}
-            </p>
-          </div>
-        );
-      })}
-    </div>
-  );
 }
 
 async function responseJson<T>(response: Response): Promise<T> {
@@ -305,20 +283,26 @@ async function responseJson<T>(response: Response): Promise<T> {
   return payload;
 }
 
-export function KnowledgeBaseDashboard() {
-  const [tab, setTab] = useState<Tab>('ask');
+export function KnowledgeBaseDashboard({
+  initialTab = 'chat',
+}: {
+  initialTab?: Tab;
+}) {
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState('');
   const [actionError, setActionError] = useState('');
   const [sourcePath, setSourcePath] = useState('');
   const [mode, setMode] = useState<IngestionMode>('indexed');
+  const [engineId, setEngineId] = useState('');
   const [enrichmentModel, setEnrichmentModel] = useState('gpt-5.6-luna');
   const [embeddingModel, setEmbeddingModel] = useState(
     'text-embedding-3-small'
   );
-  const [chunkTarget, setChunkTarget] = useState(600);
-  const [chunkOverlap, setChunkOverlap] = useState(90);
+  const [chunkTarget, setChunkTarget] = useState(320);
+  const [chunkOverlap, setChunkOverlap] = useState(50);
+  const [technicalReviewEnabled, setTechnicalReviewEnabled] = useState(false);
   const [creatingJob, setCreatingJob] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -329,7 +313,10 @@ export function KnowledgeBaseDashboard() {
   const [answer, setAnswer] = useState<AnswerResult | null>(null);
   const [autoRun, setAutoRun] = useState(false);
   const [isStepping, setIsStepping] = useState(false);
+  const [updatingJobId, setUpdatingJobId] = useState<string | null>(null);
+  const [removedJob, setRemovedJob] = useState<Job | null>(null);
   const stepping = useRef(false);
+  const queueWasActive = useRef(false);
   const defaultsApplied = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -346,6 +333,12 @@ export function KnowledgeBaseDashboard() {
         setEnrichmentModel(data.defaults.enrichmentModel);
         setEmbeddingModel(data.defaults.embeddingModel);
         setAnswerModel(data.defaults.answerModel);
+        setEngineId(
+          data.engines.find((engine) => engine.system_key === 'isogeochem')
+            ?.id ??
+            data.engines[0]?.id ??
+            ''
+        );
         defaultsApplied.current = true;
       }
     } catch (error) {
@@ -410,6 +403,21 @@ export function KnowledgeBaseDashboard() {
     activeJob?.failed_files,
   ]);
 
+  useEffect(() => {
+    if (!autoRun) {
+      queueWasActive.current = false;
+      return;
+    }
+    if (activeJob) {
+      queueWasActive.current = true;
+      return;
+    }
+    if (queueWasActive.current && !stepping.current) {
+      queueWasActive.current = false;
+      setAutoRun(false);
+    }
+  }, [activeJob, autoRun]);
+
   async function startJob(event: FormEvent) {
     event.preventDefault();
     setCreatingJob(true);
@@ -434,10 +442,7 @@ export function KnowledgeBaseDashboard() {
         const formData = new FormData();
         selectedFiles.forEach((file) => formData.append('files', file));
         const upload = await responseJson<{ sourcePath: string }>(
-          await fetch('/api/knowledge/uploads', {
-            method: 'POST',
-            body: formData,
-          })
+          await postUploadForm('/api/knowledge/uploads', formData)
         );
         requestedSourcePath = upload.sourcePath;
       }
@@ -452,6 +457,8 @@ export function KnowledgeBaseDashboard() {
             embeddingModel,
             chunkTargetTokens: chunkTarget,
             chunkOverlapTokens: chunkOverlap,
+            engineId: engineId ? Number(engineId) : undefined,
+            technicalReviewEnabled,
           }),
         })
       );
@@ -470,7 +477,11 @@ export function KnowledgeBaseDashboard() {
     }
   }
 
-  async function controlJob(job: Job, action: 'pause' | 'resume' | 'cancel') {
+  async function controlJob(
+    job: Job,
+    action: 'pause' | 'resume' | 'cancel' | 'restore'
+  ) {
+    setUpdatingJobId(job.id);
     setActionError('');
     try {
       await responseJson(
@@ -480,12 +491,74 @@ export function KnowledgeBaseDashboard() {
           body: JSON.stringify({ action }),
         })
       );
-      if (action !== 'resume') setAutoRun(false);
+      if (action === 'cancel') setRemovedJob(job);
+      if (action === 'restore') setRemovedJob(null);
       await loadOverview(true);
     } catch (error) {
       setActionError(
         error instanceof Error ? error.message : 'Unable to update job.'
       );
+    } finally {
+      setUpdatingJobId(null);
+    }
+  }
+
+  async function updateJobConfiguration(
+    job: Job,
+    next: {
+      mode: IngestionMode;
+      engineId: number | null;
+      technicalReviewEnabled: boolean;
+      enrichmentModel: string;
+      embeddingModel: string;
+    }
+  ) {
+    setUpdatingJobId(job.id);
+    setActionError('');
+    try {
+      await responseJson(
+        await fetch(`/api/knowledge/jobs/${job.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(next),
+        })
+      );
+      await loadOverview(true);
+    } catch (error) {
+      setActionError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to update processing settings.'
+      );
+    } finally {
+      setUpdatingJobId(null);
+    }
+  }
+
+  async function deleteCancelledJob(job: Job) {
+    if (
+      !window.confirm(
+        `Permanently delete Job #${job.id}?\n\nThis removes its queue history and pending review items. Indexed sources are not deleted.`
+      )
+    ) {
+      return;
+    }
+    setUpdatingJobId(job.id);
+    setActionError('');
+    try {
+      await responseJson(
+        await fetch(`/api/knowledge/jobs/${job.id}`, { method: 'DELETE' })
+      );
+      if (removedJob?.id === job.id) setRemovedJob(null);
+      await loadOverview(true);
+    } catch (error) {
+      setActionError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to permanently delete job.'
+      );
+    } finally {
+      setUpdatingJobId(null);
     }
   }
 
@@ -586,7 +659,7 @@ export function KnowledgeBaseDashboard() {
   }
 
   const data = overview!;
-  const visibleJobs = groupedJobs(data.jobs);
+  const visibleJobs = data.jobs;
   const selectedTokens = approximateTokens(selectedFiles);
   const selectedEmbeddingCost = embeddingCost(
     selectedTokens,
@@ -594,33 +667,23 @@ export function KnowledgeBaseDashboard() {
     chunkOverlap,
     embeddingModel
   );
-  const selectedEnrichmentCost =
-    (selectedTokens / 1_000_000) * 0.2 +
-    ((selectedTokens * 0.1) / 1_000_000) * 1.2;
+  const selectedEnrichmentCost = enrichmentCost(
+    selectedTokens,
+    enrichmentModel
+  );
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <PageHeader
-        title="Laboratory knowledge base"
-        description="Add laboratory documents, follow extraction and indexing, then ask questions against readable source evidence."
-        actions={
-          <div className="flex items-center gap-2">
-            <StatusPill
-              tone={data.database.openAIConfigured ? 'success' : 'warning'}
-            >
-              {data.database.openAIConfigured ? 'LLM ready' : 'API key missing'}
-            </StatusPill>
-            <StatusPill tone="special">Supabase portable</StatusPill>
-          </div>
-        }
+        title="Knowledge engine"
       />
 
-      <div className="flex gap-1 overflow-x-auto rounded-lg border bg-slate-50 p-1 dark:bg-slate-900/70">
+      <div className="flex gap-workspace overflow-x-auto border-b border-border/70">
         {(
           [
-            ['ask', BrainCircuit, 'Ask with evidence'],
+            ['chat', BrainCircuit, 'Knowledge chat'],
             ['processing', Activity, 'Processing'],
             ['review', ClipboardCheck, 'Review queue'],
-            ['library', Database, 'Stored sources'],
+            ['engines', Database, 'Engines & sources'],
           ] as const
         ).map(([value, Icon, label]) => (
           <button
@@ -629,9 +692,11 @@ export function KnowledgeBaseDashboard() {
             onClick={() => setTab(value)}
             aria-current={tab === value ? 'page' : undefined}
             className={cn(
-              'flex h-9 min-w-[120px] flex-1 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold text-muted-foreground transition-colors',
-              tab === value &&
-                'bg-background text-foreground shadow-sm ring-1 ring-border'
+              'relative flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-transparent bg-muted px-3 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+              value === 'chat'
+                ? 'text-xs font-semibold text-foreground'
+                : 'text-[11px] font-medium text-muted-foreground/70 hover:text-muted-foreground',
+              tab === value && 'border-primary bg-primary text-primary-foreground hover:text-primary-foreground'
             )}
           >
             <Icon className="h-3.5 w-3.5" />
@@ -647,8 +712,15 @@ export function KnowledgeBaseDashboard() {
         </div>
       ) : null}
 
+      {tab === 'chat' ? (
+        <KnowledgeEngineChat
+          engines={data.engines}
+          onEnginesChanged={() => loadOverview(true)}
+        />
+      ) : null}
+
       {tab === 'ask' ? (
-        <div className="grid gap-5 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.7fr)]">
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.7fr)]">
           <SectionPanel
             title="Agentic RAG answer"
             description="Hybrid retrieval → evidence reranking → one optional refinement → grounded response."
@@ -656,7 +728,7 @@ export function KnowledgeBaseDashboard() {
           >
             <form onSubmit={askQuestion} className="space-y-3">
               <label className="block">
-                <span className="mb-1.5 block font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
+                <span className="mb-1.5 block font-mono text-[11px] uppercase tracking-[0.05em] text-muted-foreground">
                   Technical question
                 </span>
                 <textarea
@@ -670,7 +742,7 @@ export function KnowledgeBaseDashboard() {
               </label>
               <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
                 <label className="min-w-0 flex-1">
-                  <span className="mb-1.5 block font-mono text-[10px] uppercase tracking-[0.05em] text-muted-foreground">
+                  <span className="mb-1.5 block font-mono text-[11px] uppercase tracking-[0.05em] text-muted-foreground">
                     Answer + rerank model
                   </span>
                   <select
@@ -715,12 +787,16 @@ export function KnowledgeBaseDashboard() {
                       Retrieval refined once
                     </StatusPill>
                   ) : null}
-                  <span className="font-mono text-[10px] text-muted-foreground">
+                  <span className="font-mono text-[11px] text-muted-foreground">
                     retrieval {answer.meta.retrievalMs} ms · generation{' '}
                     {answer.meta.generationMs} ms
                   </span>
                 </div>
-                <MarkdownResponse content={answer.answer} className="text-sm" />
+                <MarkdownResponse
+                  content={answer.answer}
+                  evidence={answer.evidence}
+                  className="text-sm"
+                />
                 {answer.meta.invalidCitations?.length ? (
                   <p className="text-xs text-destructive">
                     Citation validation flagged:{' '}
@@ -759,7 +835,7 @@ export function KnowledgeBaseDashboard() {
                 >
                   <div className="border-b px-3 py-2">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-mono text-[10px] font-semibold text-primary">
+                      <span className="font-mono text-[11px] font-semibold text-primary">
                         [KB:{item.chunkId}]
                       </span>
                       <div className="flex items-center gap-2">
@@ -772,7 +848,7 @@ export function KnowledgeBaseDashboard() {
                           href={`/api/knowledge/sources/${item.sourceId}/content`}
                           target="_blank"
                           rel="noreferrer"
-                          className="inline-flex items-center gap-1 text-[10px] font-semibold text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           Open source
                           <ExternalLink
@@ -811,7 +887,7 @@ export function KnowledgeBaseDashboard() {
       ) : null}
 
       {tab === 'processing' ? (
-        <div className="grid gap-5 xl:grid-cols-[430px_minmax(0,1fr)]">
+        <div className="grid gap-3 xl:grid-cols-[430px_minmax(0,1fr)]">
           <SectionPanel
             title="Add documents"
             description="Upload a batch, choose how deeply to process it, and add it to the knowledge base."
@@ -850,7 +926,9 @@ export function KnowledgeBaseDashboard() {
               {selectedFiles.length ? (
                 <div className="max-h-36 space-y-1 overflow-y-auto border-y py-2">
                   {selectedFiles.map((file, index) => {
-                    const DocumentIcon = /\.(?:csv|tsv|xls|xlsx)$/i.test(file.name)
+                    const DocumentIcon = /\.(?:csv|tsv|xls|xlsx)$/i.test(
+                      file.name
+                    )
                       ? FileSpreadsheet
                       : /\.(?:png|jpe?g|webp|gif)$/i.test(file.name)
                         ? FileSearch
@@ -867,7 +945,7 @@ export function KnowledgeBaseDashboard() {
                         <span className="min-w-0 flex-1 truncate">
                           {file.name}
                         </span>
-                        <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                        <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
                           {bytes(file.size)}
                         </span>
                         <button
@@ -907,7 +985,30 @@ export function KnowledgeBaseDashboard() {
               </details>
 
               <label className="block">
-                <span className="mb-1.5 block font-mono text-[10px] uppercase text-muted-foreground">
+                <span className="mb-1.5 block font-mono text-[11px] uppercase text-muted-foreground">
+                  Target knowledge engine
+                </span>
+                <select
+                  value={engineId}
+                  onChange={(event) => setEngineId(event.target.value)}
+                  className={selectClass}
+                  required
+                >
+                  {data.engines.map((engine) => (
+                    <option key={engine.id} value={engine.id}>
+                      {engine.name}
+                      {engine.enabled ? '' : ' · disabled'}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1.5 text-[11px] leading-4 text-muted-foreground">
+                  Processed sources are added to this engine and can later be
+                  moved, shared, or disabled under Engines &amp; sources.
+                </p>
+              </label>
+
+              <label className="block">
+                <span className="mb-1.5 block font-mono text-[11px] uppercase text-muted-foreground">
                   Processing depth
                 </span>
                 <select
@@ -936,7 +1037,7 @@ export function KnowledgeBaseDashboard() {
 
               {mode === 'enriched' ? (
                 <label className="block">
-                  <span className="mb-1.5 flex items-center gap-1 font-mono text-[10px] uppercase text-violet-700 dark:text-violet-300">
+                  <span className="mb-1.5 flex items-center gap-1 font-mono text-[11px] uppercase text-violet-700 dark:text-violet-300">
                     <Sparkles className="h-3 w-3" /> High-volume enrichment
                     model
                   </span>
@@ -960,7 +1061,7 @@ export function KnowledgeBaseDashboard() {
 
               {mode !== 'parse_only' ? (
                 <label className="block">
-                  <span className="mb-1.5 block font-mono text-[10px] uppercase text-muted-foreground">
+                  <span className="mb-1.5 block font-mono text-[11px] uppercase text-muted-foreground">
                     Embedding model · 1024 dimensions
                   </span>
                   <select
@@ -980,7 +1081,7 @@ export function KnowledgeBaseDashboard() {
 
               <div className="grid grid-cols-2 gap-3">
                 <label>
-                  <span className="mb-1.5 block font-mono text-[10px] uppercase text-muted-foreground">
+                  <span className="mb-1.5 block font-mono text-[11px] uppercase text-muted-foreground">
                     Target tokens
                   </span>
                   <Input
@@ -994,7 +1095,7 @@ export function KnowledgeBaseDashboard() {
                   />
                 </label>
                 <label>
-                  <span className="mb-1.5 block font-mono text-[10px] uppercase text-muted-foreground">
+                  <span className="mb-1.5 block font-mono text-[11px] uppercase text-muted-foreground">
                     Overlap tokens
                   </span>
                   <Input
@@ -1008,6 +1109,27 @@ export function KnowledgeBaseDashboard() {
                   />
                 </label>
               </div>
+
+              <label className="flex items-start gap-2 rounded-md border border-input bg-muted/30 p-3 text-xs">
+                <input
+                  type="checkbox"
+                  checked={technicalReviewEnabled}
+                  onChange={(event) =>
+                    setTechnicalReviewEnabled(event.target.checked)
+                  }
+                  className="mt-0.5 h-4 w-4 rounded border-input accent-primary"
+                />
+                <span>
+                  <span className="block font-semibold">
+                    Scientific message filtering and review
+                  </span>
+                  <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">
+                    Use for Isogeochem message exports to review scientific,
+                    technical, and factual content. Leave off for books and PDFs;
+                    they will be chunked and indexed directly.
+                  </span>
+                </span>
+              </label>
 
               {selectedFiles.length ? (
                 <div className="border-y py-3 text-[11px] leading-5 text-muted-foreground">
@@ -1025,9 +1147,9 @@ export function KnowledgeBaseDashboard() {
                       </span>
                     </div>
                   ) : null}
-                  {mode === 'enriched' && enrichmentModel === 'gpt-5.6-luna' ? (
+                  {mode === 'enriched' ? (
                     <div className="flex items-center justify-between gap-3">
-                      <span>Estimated Luna enrichment</span>
+                      <span>Estimated enrichment cost</span>
                       <span className="font-mono text-foreground">
                         {money(selectedEnrichmentCost)}
                       </span>
@@ -1078,7 +1200,7 @@ export function KnowledgeBaseDashboard() {
 
           <SectionPanel
             title="Processing jobs"
-            description="Each file is extracted, cleaned, optionally enriched, embedded, and indexed. Open a job to inspect every file."
+            description="Select the jobs to include and adjust them until file results are committed. Opening a setting stops auto-processing after the current file. API estimates use source size until extraction provides exact chunk counts."
             actions={
               <div className="flex flex-wrap gap-2">
                 {activeJob ? (
@@ -1098,15 +1220,15 @@ export function KnowledgeBaseDashboard() {
                     </Button>
                     <Button
                       size="sm"
-                      variant={autoRun ? 'destructive' : 'default'}
-                      onClick={() => setAutoRun((value) => !value)}
+                      variant={autoRun ? 'outline' : 'default'}
+                      onClick={() => setAutoRun((current) => !current)}
                     >
                       {autoRun ? (
-                        <Square className="mr-1.5 h-3.5 w-3.5" />
+                        <Pause className="mr-1.5 h-3.5 w-3.5" />
                       ) : (
                         <Activity className="mr-1.5 h-3.5 w-3.5" />
                       )}
-                      {autoRun ? 'Stop processing' : 'Process queue'}
+                      {autoRun ? 'Stop after current file' : 'Process queue'}
                     </Button>
                   </>
                 ) : null}
@@ -1122,8 +1244,44 @@ export function KnowledgeBaseDashboard() {
             }
             bodyClassName="p-0"
           >
+            {removedJob ? (
+              <div
+                className="flex flex-col gap-2 border-b bg-muted/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+                role="status"
+                aria-live="polite"
+              >
+                <p className="text-xs text-foreground">
+                  Job #{removedJob.id} was cancelled. Restore it or use the
+                  trash icon to delete it permanently.
+                </p>
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={updatingJobId === removedJob.id}
+                    onClick={() => void controlJob(removedJob, 'restore')}
+                  >
+                    {updatingJobId === removedJob.id ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    Undo
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    title="Dismiss"
+                    aria-label="Dismiss removed job message"
+                    onClick={() => setRemovedJob(null)}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+            ) : null}
             {visibleJobs.length ? (
-              visibleJobs.map(({ job, repeated }) => {
+              visibleJobs.map((job) => {
                 const settled =
                   Number(job.processed_files) +
                   Number(job.skipped_files) +
@@ -1131,144 +1289,488 @@ export function KnowledgeBaseDashboard() {
                 const progress = job.total_files
                   ? Math.round((settled / Number(job.total_files)) * 100)
                   : 0;
+                const pendingReview =
+                  job.status === 'paused' && job.stage === 'clean'
+                    ? job.files.reduce(
+                        (total, file) => total + Number(file.warning_count),
+                        0
+                      )
+                    : 0;
+                const editable =
+                  ['queued', 'paused'].includes(job.status) &&
+                  settled === 0 &&
+                  job.files.every(
+                    (file) =>
+                      file.status === 'queued' &&
+                      Number(file.message_count) === 0 &&
+                      Number(file.chunk_count) === 0 &&
+                      Number(file.embedded_chunks) === 0
+                  );
+                const settingsRestartJob =
+                  editable &&
+                  (job.stage !== 'queued' ||
+                    job.files.some((file) => file.stage !== 'queued'));
+                const estimatedTokens = approximateJobTokens(job);
+                const estimatedEnrichmentCost =
+                  job.mode === 'enriched'
+                    ? enrichmentCost(
+                        estimatedTokens,
+                        job.enrichment_model ?? data.defaults.enrichmentModel
+                      )
+                    : 0;
+                const estimatedEmbeddingCost =
+                  job.mode !== 'parse_only'
+                    ? embeddingCost(
+                        estimatedTokens,
+                        job.chunk_target_tokens,
+                        job.chunk_overlap_tokens,
+                        job.embedding_model ?? data.defaults.embeddingModel
+                      )
+                    : 0;
+                const pendingReviewCount =
+                  Number(job.pending_review_count) || pendingReview;
+                const jobIssue =
+                  job.last_error ??
+                  job.files.find((file) => file.error)?.error ??
+                  null;
+                const fileTitle = [
+                  ...job.files
+                    .slice(0, 8)
+                    .map(
+                      (file) =>
+                        `${file.source_name} · ${file.status}/${file.stage}`
+                    ),
+                  ...(job.files.length > 8
+                    ? [`+${job.files.length - 8} more files`]
+                    : []),
+                ].join('\n');
                 return (
                   <article
                     key={job.id}
-                    className="border-b p-4 last:border-b-0"
+                    className="border-b px-3 py-1.5 last:border-b-0"
                   >
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="font-display text-sm font-semibold">
-                            Job #{job.id}
-                          </h3>
+                    <div className="overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                      <div className="flex h-8 min-w-[772px] items-center gap-1.5 whitespace-nowrap">
+                        <div className="flex w-14 shrink-0 items-center">
+                          {['queued', 'running', 'paused'].includes(
+                            job.status
+                          ) ? (
+                            <label
+                              className={cn(
+                                'flex h-7 w-14 cursor-pointer items-center justify-center gap-1 rounded border border-input bg-background text-[11px] font-semibold shadow-sm transition-colors hover:border-primary/40 hover:bg-accent',
+                                updatingJobId === job.id &&
+                                  'pointer-events-none opacity-50'
+                              )}
+                              title="Include this job in the Process queue"
+                            >
+                              <input
+                                type="checkbox"
+                                className="h-3.5 w-3.5 rounded border-input accent-primary"
+                                checked={['queued', 'running'].includes(
+                                  job.status
+                                )}
+                                disabled={updatingJobId === job.id}
+                                onChange={(event) =>
+                                  void controlJob(
+                                    job,
+                                    event.currentTarget.checked
+                                      ? 'resume'
+                                      : 'pause'
+                                  )
+                                }
+                                aria-label={`Include Job #${job.id} in the Process queue`}
+                              />
+                              Queue
+                            </label>
+                          ) : null}
+                        </div>
+                        <h3 className="w-10 shrink-0 truncate font-display text-xs font-semibold">
+                          #{job.id}
+                        </h3>
+                        <div className="w-[72px] shrink-0 overflow-hidden">
                           <StatusPill tone={statusTone(job.status)}>
                             {job.status}
                           </StatusPill>
-                          <StatusPill
-                            tone={
-                              job.mode === 'enriched' ? 'special' : 'neutral'
-                            }
-                          >
-                            {job.mode.replace('_', ' ')}
-                          </StatusPill>
-                          {repeated > 1 ? (
-                            <StatusPill tone="warning">
-                              repeated {repeated} times
-                            </StatusPill>
+                        </div>
+                        <span
+                          className="min-w-40 flex-1 truncate font-mono text-[11px] text-muted-foreground"
+                          title={job.current_file ?? job.source_path}
+                        >
+                          {fileName(job.current_file ?? job.source_path)}
+                        </span>
+                        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+                          {jobIssue ? (
+                            <AlertTriangle
+                              className="h-3.5 w-3.5 text-rose-600 dark:text-rose-300"
+                              aria-label={jobIssue}
+                            />
+                          ) : null}
+                        </span>
+                        <span
+                          className="w-12 shrink-0 truncate font-mono text-[11px] text-muted-foreground"
+                          title={`Current stage: ${job.stage}`}
+                        >
+                          {job.stage}
+                        </span>
+                        <div
+                          className="flex w-52 shrink-0 items-center gap-2"
+                          aria-label={`${settled} of ${job.total_files} files, ${progress}% complete`}
+                        >
+                          <div className="h-1 flex-1 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                            <div
+                              className="h-full rounded-full bg-primary transition-[width]"
+                              style={{ width: `${progress}%` }}
+                            />
+                          </div>
+                          <span className="font-mono text-[9px] tabular-nums text-muted-foreground">
+                            {settled}/{job.total_files} · {progress}%
+                          </span>
+                        </div>
+                        <div
+                          className={cn(
+                            'ml-auto flex shrink-0 items-center justify-end gap-2',
+                            job.status === 'cancelled'
+                              ? 'w-[208px]'
+                              : 'w-[132px]'
+                          )}
+                        >
+                          {Number(job.review_count) > 0 || pendingReviewCount ? (
+                            <Button
+                              asChild
+                              size="sm"
+                              variant="outline"
+                              className="h-7 w-24 justify-center px-1.5 text-[11px]"
+                            >
+                              <a href={`/knowledge/processing/${job.id}/review`}>
+                                <ClipboardCheck className="mr-1 h-3 w-3" />
+                                Review
+                                {pendingReviewCount
+                                  ? ` ${pendingReviewCount}`
+                                  : ''}
+                              </a>
+                            </Button>
+                          ) : null}
+                          {job.status === 'cancelled' ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 w-[68px] justify-center px-1.5 text-[11px]"
+                              disabled={updatingJobId === job.id}
+                              onClick={() => void controlJob(job, 'restore')}
+                            >
+                              {updatingJobId === job.id ? (
+                                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                              ) : (
+                                <RotateCcw className="mr-1 h-3 w-3" />
+                              )}
+                              Restore
+                            </Button>
+                          ) : null}
+                          {['queued', 'running', 'paused', 'cancelled'].includes(
+                            job.status
+                          ) ? (
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-7 w-7 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                              title={
+                                job.status === 'cancelled'
+                                  ? 'Permanently delete job'
+                                  : 'Cancel job after the current file'
+                              }
+                              aria-label={
+                                job.status === 'cancelled'
+                                  ? `Permanently delete Job #${job.id}`
+                                  : `Cancel Job #${job.id}`
+                              }
+                              disabled={updatingJobId === job.id}
+                              onClick={() =>
+                                void (job.status === 'cancelled'
+                                  ? deleteCancelledJob(job)
+                                  : controlJob(job, 'cancel'))
+                              }
+                            >
+                              {updatingJobId === job.id ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-3 w-3" />
+                              )}
+                            </Button>
                           ) : null}
                         </div>
-                        <p
-                          className="mt-1 truncate font-mono text-[10px] text-muted-foreground"
-                          title={job.source_path}
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto overscroll-x-contain border-t border-border/70 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                      <div className="flex h-8 min-w-[780px] items-center gap-2 whitespace-nowrap text-[11px]">
+                        <span className="shrink-0 text-muted-foreground">
+                          Enrich{' '}
+                          <strong className="font-mono font-semibold tabular-nums text-foreground">
+                            {money(estimatedEnrichmentCost)}
+                          </strong>
+                        </span>
+                        <span className="shrink-0 text-muted-foreground">
+                          Embed{' '}
+                          <strong className="font-mono font-semibold tabular-nums text-foreground">
+                            {money(estimatedEmbeddingCost)}
+                          </strong>
+                        </span>
+                        <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
+                          {compactNumber(estimatedTokens)} tok
+                        </span>
+                        <span
+                          className="shrink-0 font-mono tabular-nums text-muted-foreground"
+                          title={fileTitle}
                         >
-                          {compactPath(job.source_path)}
-                        </p>
-                      </div>
-                      <div className="flex shrink-0 gap-1">
-                        {['queued', 'running'].includes(job.status) ? (
-                          <Button
-                            size="icon"
-                            variant="outline"
-                            title="Pause after current file"
-                            onClick={() => void controlJob(job, 'pause')}
-                          >
-                            <Pause className="h-3.5 w-3.5" />
-                          </Button>
-                        ) : null}
-                        {job.status === 'paused' ? (
-                          <Button
-                            size="icon"
-                            variant="outline"
-                            title="Resume"
-                            onClick={() => void controlJob(job, 'resume')}
-                          >
-                            <Play className="h-3.5 w-3.5" />
-                          </Button>
-                        ) : null}
-                        {['queued', 'running', 'paused'].includes(
-                          job.status
-                        ) ? (
-                          <Button
-                            size="icon"
-                            variant="outline"
-                            title="Cancel after current file"
-                            onClick={() => void controlJob(job, 'cancel')}
-                          >
-                            <Square className="h-3.5 w-3.5" />
-                          </Button>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="mt-3">
-                      <ProvenanceRail job={job} />
-                    </div>
-                    <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-                      <div
-                        className="h-full rounded-full bg-primary transition-[width]"
-                        style={{ width: `${progress}%` }}
-                      />
-                    </div>
-                    <div className="mt-2 flex flex-wrap justify-between gap-x-4 gap-y-1 font-mono text-[10px] text-muted-foreground">
-                      <span>
-                        {settled}/{job.total_files} files · {progress}%
-                      </span>
-                      <span>
-                        {number(job.embedded_chunks)}/{number(job.total_chunks)}{' '}
-                        embeddings
-                      </span>
-                    </div>
-                    {job.current_file ? (
-                      <p className="mt-2 truncate text-xs text-foreground">
-                        <Loader2 className="mr-1.5 inline h-3 w-3 animate-spin text-primary" />
-                        {job.current_file}
-                      </p>
-                    ) : null}
-                    {job.last_error ? (
-                      <p className="mt-2 rounded border border-rose-200 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-800 dark:border-rose-900 dark:bg-rose-950/50 dark:text-rose-200">
-                        {job.last_error}
-                      </p>
-                    ) : null}
-                    {job.files.length ? (
-                      <details className="group mt-3 border-t pt-2">
-                        <summary className="flex cursor-pointer list-none items-center justify-between text-[11px] font-semibold">
-                          <span>
-                            {job.files.length}{' '}
-                            {job.files.length === 1 ? 'file' : 'files'} in this
-                            batch
+                          {number(job.embedded_chunks)}/
+                          {number(job.total_chunks)} emb
+                        </span>
+                        {['queued', 'paused'].includes(job.status) ? (
+                          <>
+                            <label
+                              className={cn(
+                                'ml-auto flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded border border-input bg-background px-2 font-medium text-foreground shadow-sm',
+                                (!editable || updatingJobId === job.id) &&
+                                  'cursor-not-allowed opacity-50'
+                              )}
+                              title="Review scientific, technical, and factual messages before indexing. Leave off for books and PDFs."
+                            >
+                              <input
+                                type="checkbox"
+                                className="h-3.5 w-3.5 rounded border-input accent-primary"
+                                checked={job.technical_review_enabled}
+                                disabled={!editable || updatingJobId === job.id}
+                                onPointerDown={() => setAutoRun(false)}
+                                onChange={(event) =>
+                                  void updateJobConfiguration(job, {
+                                    mode: job.mode,
+                                    engineId: job.engine_id
+                                      ? Number(job.engine_id)
+                                      : null,
+                                    technicalReviewEnabled:
+                                      event.currentTarget.checked,
+                                    enrichmentModel:
+                                      job.enrichment_model ??
+                                      data.defaults.enrichmentModel,
+                                    embeddingModel:
+                                      job.embedding_model ??
+                                      data.defaults.embeddingModel,
+                                  })
+                                }
+                                aria-label={`Scientific filtering and review for Job #${job.id}`}
+                              />
+                              Sci review
+                            </label>
+                            <label className="flex shrink-0 items-center gap-1 text-muted-foreground">
+                              <span>Engine</span>
+                              <select
+                                className={cn(compactJobSelectClass, 'w-20')}
+                                value={job.engine_id ?? ''}
+                                disabled={!editable || updatingJobId === job.id}
+                                title={
+                                  editable
+                                    ? settingsRestartJob
+                                      ? 'Change destination engine and restart this uncommitted job'
+                                      : 'Change destination knowledge engine'
+                                    : 'Settings lock after results have been committed'
+                                }
+                                aria-label={`Destination engine for Job #${job.id}`}
+                                onFocus={() => setAutoRun(false)}
+                                onPointerDown={() => setAutoRun(false)}
+                                onChange={(event) =>
+                                  void updateJobConfiguration(job, {
+                                    mode: job.mode,
+                                    engineId: event.currentTarget.value
+                                      ? Number(event.currentTarget.value)
+                                      : null,
+                                    technicalReviewEnabled:
+                                      job.technical_review_enabled,
+                                    enrichmentModel:
+                                      job.enrichment_model ??
+                                      data.defaults.enrichmentModel,
+                                    embeddingModel:
+                                      job.embedding_model ??
+                                      data.defaults.embeddingModel,
+                                  })
+                                }
+                              >
+                                <option value="">No engine</option>
+                                {data.engines.map((engine) => (
+                                  <option key={engine.id} value={engine.id}>
+                                    {engine.name}
+                                    {engine.enabled ? '' : ' (disabled)'}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="flex shrink-0 items-center gap-1 text-muted-foreground">
+                              <span>Depth</span>
+                              <select
+                                className={cn(compactJobSelectClass, 'w-[72px]')}
+                                value={job.mode}
+                                disabled={!editable || updatingJobId === job.id}
+                                title={
+                                  editable
+                                    ? settingsRestartJob
+                                      ? 'Change processing depth and restart this uncommitted job'
+                                      : 'Change processing depth'
+                                    : 'Settings lock after results have been committed'
+                                }
+                                aria-label={`Processing depth for Job #${job.id}`}
+                                onFocus={() => setAutoRun(false)}
+                                onPointerDown={() => setAutoRun(false)}
+                                onChange={(event) =>
+                                  void updateJobConfiguration(job, {
+                                    mode: event.currentTarget
+                                      .value as IngestionMode,
+                                    engineId: job.engine_id
+                                      ? Number(job.engine_id)
+                                      : null,
+                                    technicalReviewEnabled:
+                                      job.technical_review_enabled,
+                                    enrichmentModel:
+                                      job.enrichment_model ??
+                                      data.defaults.enrichmentModel,
+                                    embeddingModel:
+                                      job.embedding_model ??
+                                      data.defaults.embeddingModel,
+                                  })
+                                }
+                              >
+                                <option value="parse_only">Extract only</option>
+                                <option value="indexed">Searchable</option>
+                                <option value="enriched">Enriched</option>
+                              </select>
+                            </label>
+                            <label
+                              className={cn(
+                                'flex shrink-0 items-center gap-1 text-muted-foreground',
+                                job.mode !== 'enriched' && 'hidden'
+                              )}
+                            >
+                              <span>Enrich</span>
+                              <select
+                                className={cn(compactJobSelectClass, 'w-20')}
+                                value={
+                                  job.enrichment_model ??
+                                  data.defaults.enrichmentModel
+                                }
+                                disabled={
+                                  !editable ||
+                                  job.mode !== 'enriched' ||
+                                  updatingJobId === job.id
+                                }
+                                title={
+                                  !editable
+                                    ? 'Settings lock after results have been committed'
+                                    : job.mode !== 'enriched'
+                                      ? 'Choose Enriched processing depth first'
+                                      : 'Change enrichment model'
+                                }
+                                aria-label={`Enrichment model for Job #${job.id}`}
+                                onFocus={() => setAutoRun(false)}
+                                onPointerDown={() => setAutoRun(false)}
+                                onChange={(event) =>
+                                  void updateJobConfiguration(job, {
+                                    mode: job.mode,
+                                    engineId: job.engine_id
+                                      ? Number(job.engine_id)
+                                      : null,
+                                    technicalReviewEnabled:
+                                      job.technical_review_enabled,
+                                    enrichmentModel: event.currentTarget.value,
+                                    embeddingModel:
+                                      job.embedding_model ??
+                                      data.defaults.embeddingModel,
+                                  })
+                                }
+                              >
+                                <option value="gpt-5.6-luna">GPT-5.6 Luna</option>
+                                <option value="gpt-5.6-terra">GPT-5.6 Terra</option>
+                                <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
+                              </select>
+                            </label>
+                            <label
+                              className={cn(
+                                'flex shrink-0 items-center gap-1 text-muted-foreground',
+                                job.mode === 'parse_only' && 'hidden'
+                              )}
+                            >
+                              <span>Embed</span>
+                              <select
+                                className={cn(compactJobSelectClass, 'w-28')}
+                                value={
+                                  job.embedding_model ??
+                                  data.defaults.embeddingModel
+                                }
+                                disabled={
+                                  !editable ||
+                                  job.mode === 'parse_only' ||
+                                  updatingJobId === job.id
+                                }
+                                title={
+                                  !editable
+                                    ? 'Settings lock after results have been committed'
+                                    : job.mode === 'parse_only'
+                                      ? 'Choose Searchable or Enriched processing depth first'
+                                      : 'Change embedding model'
+                                }
+                                aria-label={`Embedding model for Job #${job.id}`}
+                                onFocus={() => setAutoRun(false)}
+                                onPointerDown={() => setAutoRun(false)}
+                                onChange={(event) =>
+                                  void updateJobConfiguration(job, {
+                                    mode: job.mode,
+                                    engineId: job.engine_id
+                                      ? Number(job.engine_id)
+                                      : null,
+                                    technicalReviewEnabled:
+                                      job.technical_review_enabled,
+                                    enrichmentModel:
+                                      job.enrichment_model ??
+                                      data.defaults.enrichmentModel,
+                                    embeddingModel: event.currentTarget.value,
+                                  })
+                                }
+                              >
+                                <option value="text-embedding-3-small">
+                                  text-embedding-3-small
+                                </option>
+                                <option value="text-embedding-3-large">
+                                  text-embedding-3-large
+                                </option>
+                              </select>
+                            </label>
+                            {settingsRestartJob || !editable || autoRun ? (
+                              <AlertTriangle
+                                className={cn(
+                                  'h-3.5 w-3.5 shrink-0',
+                                  settingsRestartJob
+                                    ? 'text-amber-600 dark:text-amber-300'
+                                    : 'text-muted-foreground'
+                                )}
+                                aria-label={
+                                  settingsRestartJob
+                                    ? 'Changing a setting restarts this uncommitted job from extraction and clears pending review preparation.'
+                                    : !editable
+                                      ? 'Settings are locked because this job has committed file results.'
+                                      : 'Opening a setting stops the queue after the current file.'
+                                }
+                              />
+                            ) : null}
+                          </>
+                        ) : (
+                          <span className="ml-auto shrink-0 text-muted-foreground">
+                            {job.mode.replace('_', ' ')}
+                            {job.embedding_model
+                              ? ` · ${job.embedding_model}`
+                              : ''}
+                            {job.technical_review_enabled
+                              ? ' · scientific review'
+                              : ''}
                           </span>
-                          <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
-                        </summary>
-                        <div className="mt-2 max-h-56 divide-y overflow-y-auto">
-                          {job.files.map((file) => (
-                            <div key={file.id} className="py-2 text-[11px]">
-                              <div className="flex items-center justify-between gap-3">
-                                <span className="min-w-0 truncate font-medium">
-                                  {file.source_name}
-                                </span>
-                                <StatusPill tone={statusTone(file.status)}>
-                                  {file.status === 'running'
-                                    ? file.stage
-                                    : file.status}
-                                </StatusPill>
-                              </div>
-                              <p className="mt-1 font-mono text-[9px] text-muted-foreground">
-                                {number(file.chunk_count)} chunks ·{' '}
-                                {number(file.embedded_chunks)} embeddings
-                                {Number(file.warning_count)
-                                  ? ` · ${file.warning_count} warnings`
-                                  : ''}
-                              </p>
-                              {file.error ? (
-                                <p className="mt-1 text-rose-700 dark:text-rose-300">
-                                  {file.error}
-                                </p>
-                              ) : null}
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    ) : null}
+                        )}
+                      </div>
+                    </div>
                   </article>
                 );
               })
@@ -1285,6 +1787,8 @@ export function KnowledgeBaseDashboard() {
       {tab === 'review' ? (
         <KnowledgeReviewQueue onAddDocuments={() => setTab('processing')} />
       ) : null}
+
+      {tab === 'engines' ? <KnowledgeEnginesManager /> : null}
 
       {tab === 'library' ? (
         <SectionPanel
@@ -1342,7 +1846,7 @@ export function KnowledgeBaseDashboard() {
                         {source.status}
                       </StatusPill>
                       {Number(source.warning_count) ? (
-                        <span className="ml-1.5 text-[10px] text-warning">
+                        <span className="ml-1.5 text-[11px] text-warning">
                           {source.warning_count} warnings
                         </span>
                       ) : null}
@@ -1356,7 +1860,7 @@ export function KnowledgeBaseDashboard() {
                     <TableCell className="text-right font-mono">
                       {bytes(Number(source.byte_size))}
                     </TableCell>
-                    <TableCell className="font-mono text-[10px] text-muted-foreground">
+                    <TableCell className="font-mono text-[11px] text-muted-foreground">
                       {source.sha256.slice(0, 12)}…
                     </TableCell>
                     <TableCell>

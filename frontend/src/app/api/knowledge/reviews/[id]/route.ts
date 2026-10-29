@@ -18,10 +18,10 @@ const VALID_STATUSES = new Set<ReviewStatus>([
 
 export async function GET(
   _request: Request,
-  context: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
-    const result = await getReviewItem(Number(context.params.id));
+    const result = await getReviewItem(Number((await context.params).id));
     if (!result) {
       return NextResponse.json(
         { error: 'Review item not found.' },
@@ -38,7 +38,7 @@ export async function GET(
 
 export async function PATCH(
   request: Request,
-  context: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
     const body = (await request.json().catch(() => null)) as
@@ -51,7 +51,7 @@ export async function PATCH(
       );
     }
     const updated = await updateReviewItem(
-      Number(context.params.id),
+      Number((await context.params).id),
       body.status,
       body.reviewerNote ?? ''
     );

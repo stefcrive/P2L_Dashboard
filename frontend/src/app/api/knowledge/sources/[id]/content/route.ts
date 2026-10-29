@@ -1,3 +1,4 @@
+import { hydrateKnowledgePath } from '@/lib/cloud/knowledge-files';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
@@ -24,7 +25,7 @@ const MIME_TYPES: Record<string, string> = {
 
 export async function GET(
   _request: Request,
-  context: { params: { id: string } }
+  context: { params: Promise<{ id: string }> }
 ) {
   try {
     const database = await getKnowledgeDatabase();
@@ -32,7 +33,7 @@ export async function GET(
       source_path: string;
       source_name: string;
     }>(`SELECT source_path, source_name FROM kb.sources WHERE id = $1`, [
-      Number(context.params.id),
+      Number((await context.params).id),
     ]);
     const source = result.rows[0];
     if (!source) {
@@ -46,6 +47,7 @@ export async function GET(
     const requestedPath = path.isAbsolute(source.source_path)
       ? source.source_path
       : path.resolve(config.repositoryRoot, source.source_path);
+    await hydrateKnowledgePath(requestedPath);
     const sourcePath = assertPathInsideRepository(requestedPath);
     const contents = await fs.readFile(sourcePath);
     const extension = path.extname(source.source_name).toLowerCase();

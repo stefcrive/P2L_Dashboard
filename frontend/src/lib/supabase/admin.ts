@@ -114,6 +114,7 @@ export function getSupabaseAdminClient(): any {
 }
 
 export function getApplicationDatabaseSource() {
+  if (getWorkspaceEnvironmentValue('APP_DATABASE_MODE') === 'neon') return 'neon' as const;
   return getWorkspaceEnvironmentValue('APP_DATABASE_MODE')?.toLowerCase() ===
     'supabase'
     ? ('supabase' as const)

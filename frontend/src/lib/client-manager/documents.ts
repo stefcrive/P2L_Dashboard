@@ -1,6 +1,8 @@
 import 'server-only';
 
 import { createHash } from 'node:crypto';
+import { cloudEnabled } from '@/lib/cloud/database';
+import { storeCloudDocument } from '@/lib/cloud/files';
 
 import {
   DOCUMENT_CATEGORIES,
@@ -58,13 +60,14 @@ export async function storeClientDocument({
   const relativePath = `database/${normalizedClientId}/${timestamp}-${fileName}`;
   const extensionMatch = fileName.match(/(\.[^.]+)$/);
   const extension = extensionMatch?.[1]?.toLowerCase() ?? '';
+  const cloudPath = cloudEnabled() ? await storeCloudDocument(bytes) : null;
   const { data, error } = await database
     .from('client_documents')
     .insert({
       client_id: normalizedClientId,
       file_name: fileName,
       relative_path: relativePath,
-      absolute_path: `database://${relativePath}`,
+      absolute_path: cloudPath ?? `database://${relativePath}`,
       year: Number.isInteger(year) ? year : null,
       extension,
       category,
@@ -74,7 +77,7 @@ export async function storeClientDocument({
       mime_type: file.type || 'application/octet-stream',
       content_sha256: createHash('sha256').update(bytes).digest('hex'),
       content:
-        getApplicationDatabaseSource() === 'supabase'
+        cloudPath ? null : getApplicationDatabaseSource() === 'supabase'
           ? `\\x${Buffer.from(bytes).toString('hex')}`
           : bytes,
       storage_origin: 'upload',
