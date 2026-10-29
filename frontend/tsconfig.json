@@ -35,8 +35,9 @@
   "include": [
     "**/*.ts",
     "**/*.tsx",
+    ".next-presentation/types/**/*.ts",
     "next-env.d.ts",
-    ".next-presentation/types/**/*.ts"
+    ".next/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

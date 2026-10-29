@@ -1,6 +1,11 @@
 # P2L Laboratory Operations
 
-A unified local-first laboratory workstation for IRMS processing, client data, results, credits, invoices, inventory, providers, maintenance, laboratory-book records, and backup evidence.
+A laboratory workstation for IRMS processing, client data, results, credits, invoices, inventory, providers, maintenance, laboratory-book records, and backup evidence.
+
+The operational version is [P2L Dashboard](https://p2l-dashboard.vercel.app).
+`start_app.bat` opens it. Vercel deploys the GitHub `main` branch automatically.
+Use `start_local.bat` for offline development or `start_cloud_dev.bat` to run locally
+with the live cloud records. See [hosted operations](docs/HOSTED_OPERATIONS.md).
 
 See [the unified architecture](docs/UNIFIED_LAB_OPERATIONS.md) for the current-state assessment, route-to-domain mapping, database model, and remaining boundaries.
 
