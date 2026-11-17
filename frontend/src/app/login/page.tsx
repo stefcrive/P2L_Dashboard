@@ -3,6 +3,7 @@ import { useState, type FormEvent } from 'react';
 import { EvoStudioBrand, P2LLogo } from '@/components/layout/brand-logos';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { readSignInResponse } from '@/lib/auth/client';
 
 export default function Login() {
   const [error,setError]=useState(''); const [busy,setBusy]=useState(false);
@@ -10,7 +11,7 @@ export default function Login() {
     event.preventDefault(); setBusy(true); setError(''); const form=new FormData(event.currentTarget);
     try {
       const response=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:form.get('username'),password:form.get('password')})});
-      const result=await response.json(); if(!response.ok) throw new Error(result.detail??result.error??'Unable to sign in.');
+      await readSignInResponse(response);
       const next=new URLSearchParams(window.location.search).get('next'); window.location.assign(next?.startsWith('/') && !next.startsWith('//')?next:'/');
     } catch(error) { setError(error instanceof Error?error.message:'Unable to sign in.'); setBusy(false); }
   }
