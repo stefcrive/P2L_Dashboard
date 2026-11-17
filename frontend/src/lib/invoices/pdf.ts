@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
+  BlendMode,
   PDFDocument,
   type PDFImage,
   type PDFPage,
@@ -775,7 +776,13 @@ export async function createInvoicePdf(payload: InvoicePdfPayload) {
     y -= 18;
     const dimensions = signature.scaleToFit(190, 54);
     const x = (A4.width - dimensions.width) / 2;
-    page.drawImage(signature, { x, y: y - dimensions.height, ...dimensions });
+    page.drawImage(signature, {
+      x,
+      y: y - dimensions.height,
+      ...dimensions,
+      // Keep the original ink while letting the page show through the white background.
+      blendMode: BlendMode.Multiply,
+    });
     y -= dimensions.height + 10;
     page.drawLine({
       start: { x: A4.width / 2 - 110, y },
